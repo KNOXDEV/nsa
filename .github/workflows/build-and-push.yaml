@@ -20,7 +20,6 @@ jobs:
         run: |
           curl -o /usr/local/bin/scw -L "https://github.com/scaleway/scaleway-cli/releases/download/v2.5.4/scaleway-cli_2.5.4_linux_amd64"
           chmod +x /usr/local/bin/scw
-          scw init
           scw registry login
       - name: Derive version from Cargo.toml
         run: |
