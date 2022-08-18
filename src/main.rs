@@ -11,10 +11,11 @@ use tables::init_tables;
 #[tokio::main]
 async fn main() {
     // connect to locally running postgres
-    let (postgres_client, connection) =
-        tokio_postgres::connect("host=localhost user=postgres", tokio_postgres::NoTls)
-            .await
-            .expect("failed to connect to postgres server");
+    let pg_host = env::var("PG_HOST").expect("no environment variable PG_HOST provided");
+    let config = format!("host={} user=postgres", pg_host);
+    let (postgres_client, connection) = tokio_postgres::connect(&config, tokio_postgres::NoTls)
+        .await
+        .expect("failed to connect to postgres server");
 
     tokio::spawn(async move {
         connection.await.expect("connection error");
@@ -33,5 +34,5 @@ async fn main() {
         .await
         .expect("discord auth failed");
 
-    client.start().await.expect("Client error");
+    client.start().await.expect("Client error change");
 }

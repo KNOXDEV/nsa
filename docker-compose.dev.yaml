@@ -1,0 +1,26 @@
+version: "3.9"
+services:
+  nsa-db:
+    image: postgres
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - nsa-db:/var/lib/postgresql/data
+    networks:
+      - nsa-net
+  nsa:
+    restart: always
+    depends_on:
+      - nsa-db
+    build:
+      context: .
+    environment:
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      PG_HOST: nsa-db
+    networks:
+      - nsa-net
+networks:
+  nsa-net:
+    driver: bridge
+volumes:
+  nsa-db:
