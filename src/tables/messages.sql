@@ -3,6 +3,6 @@ CREATE TABLE IF NOT EXISTS messages (
     content text NOT NULL,
     sent_time timestamp NOT NULL,
     edit_time timestamp,
-    user_id bigint REFERENCES users(id) ON DELETE CASCADE,
-    channel_id bigint REFERENCES channels(id) ON DELETE CASCADE
+    user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE
 );
