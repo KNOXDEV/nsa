@@ -24,7 +24,7 @@ jobs:
       - name: Derive version from Cargo.toml
         run: |
           VERSION=$(sed -n "s/^version = \"\(\S*\)\"$/\1/p" Cargo.toml)
-          echo "::set-env name=VERSION::$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
       - name: Build, tag, and push
         uses: docker/build-push-action@v3.1.1
         with:
