@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v
+      - uses: actions/checkout@v3
       - name: Login to Scaleway
         uses: jawher/action-scw@v2.5.4
         env:
