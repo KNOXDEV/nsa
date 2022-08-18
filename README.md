@@ -4,8 +4,13 @@
 > but store every message sent in
 > a database
 
+### progress
 
-WIP
+- [x] Stage 1 - all messages sent are recorded
+  - [ ] Stage 1.5 - including attachments and reactions
+- [ ] Stage 2 - channels will be scraped for their historical messages as well
+- [ ] Stage 3 - make pretty dashboards and metrics using this data
+- [ ] Stage 4 - ???
 
 ### how do I add this discord bot to my server?
 
