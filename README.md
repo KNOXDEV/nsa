@@ -20,5 +20,10 @@ But you can make your own and follow
 
 ### quick start
 ```bash
-docker compose -f ./docker-compose.dev.yaml up 
+docker compose up
+```
+
+### build release images
+```bash
+docker build . -t nsa --build-arg profile=release
 ```
