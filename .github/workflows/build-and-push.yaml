@@ -18,7 +18,10 @@ jobs:
           SCW_DEFAULT_ORGANIZATION_ID: ${{ secrets.SCW_ORGANIZATION_ID }}
           SCW_DEFAULT_ZONE: fr-par-1
         run: |
-          docker run --rm -e SCW_ACCESS_KEY -e SCW_SECRET_KEY -e SCW_DEFAULT_ORGANIZATION_ID -e SCW_DEFAULT_ZONE scaleway/cli:latest registry login
+          curl -o /usr/local/bin/scw -L "https://github.com/scaleway/scaleway-cli/releases/download/v2.5.4/scaleway-cli_v2.5.4_linux_amd64"
+          chmod +x /usr/local/bin/scw
+          scw init
+          scw registry login
       - name: Derive version from Cargo.toml
         run: |
           VERSION=$(sed -n "s/^version = \"\(\S*\)\"$/\1/p" Cargo.toml)
