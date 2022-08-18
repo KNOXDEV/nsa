@@ -17,3 +17,8 @@
 Well, it's private for obvious reasons.
 But you can make your own and follow
 [this guide](https://discordjs.guide/preparations/adding-your-bot-to-servers.html#bot-invite-links).
+
+### quick start
+```bash
+docker compose -f ./docker-compose.dev.yaml up 
+```
