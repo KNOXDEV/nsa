@@ -25,7 +25,7 @@ jobs:
           VERSION=$(sed -n "s/^version = \"\(\S*\)\"$/\1/p" Cargo.toml)
           echo "::set-env name=VERSION::$VERSION"
       - name: Build, tag, and push
-        uses: docker/build-push-action@v
+        uses: docker/build-push-action@v3.1.1
         with:
           build-args: profile=release
           push: true
