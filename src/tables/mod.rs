@@ -1,4 +1,3 @@
-use tokio::join;
 use tokio_postgres::{Client, Error};
 
 const GUILDS_TABLE: &str = include_str!("./guilds.sql");
