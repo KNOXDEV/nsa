@@ -3,9 +3,10 @@ mod queries;
 use chrono::NaiveDateTime;
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
+use serenity::futures::future::join_all;
 use serenity::model::channel::{Channel, Message, ReactionType};
-use serenity::model::gateway::Ready;
-use serenity::model::user::User;
+use serenity::model::gateway::{Activity, Ready};
+use serenity::model::guild::Guild;
 
 use crate::logger::queries::Database;
 
@@ -20,12 +21,6 @@ impl DiscordLogger {
         }
     }
 
-    async fn log_user(&self, user: &User) -> Result<u64, tokio_postgres::Error> {
-        self.database
-            .insert_user(user.id.0 as i64, &user.name)
-            .await
-    }
-
     async fn log_message(
         &self,
         ctx: &Context,
@@ -37,26 +32,22 @@ impl DiscordLogger {
             NaiveDateTime::from_timestamp(ts.unix_timestamp(), 0)
         });
         let channel_id = message.channel_id.0 as i64;
+        let user_id = message.author.id.0 as i64;
+        let username = &message.author.name;
 
         // if we haven't logged this user before
-        self.log_user(&message.author).await?;
+        self.database.insert_user(user_id, username).await?;
 
-        // if this message was sent in a GuildChannel, record both
+        // if this message was sent in a GuildChannel, record both the guild and the channel
         if let Channel::Guild(channel) = message
             .channel(ctx)
             .await
-            .expect("message not sent in channel")
+            .expect("failed to get message's guild info")
         {
-            // TODO: resolve guild in a way non-reliant on cache
-            if let Some(guild) = channel.guild(ctx) {
-                self.database
-                    .insert_guild(guild.id.0 as i64, Some(&guild.name))
-                    .await?;
-            } else {
-                self.database
-                    .insert_guild(channel.guild_id.0 as i64, None)
-                    .await?;
-            }
+            // this does not store the guild name, but if its already there will not overwrite it
+            self.database
+                .insert_guild(channel.guild_id.0 as i64, None)
+                .await?;
             self.database
                 .insert_channel(
                     channel_id,
@@ -67,14 +58,14 @@ impl DiscordLogger {
                 )
                 .await?;
         }
-        // otherwise, only record the channel
+        // otherwise, only record the channel (which is probably a private message)
         else {
             self.database
                 .insert_channel(channel_id, None, None, id, id)
                 .await?;
         }
 
-        // if we haven't logged this message before
+        // finally, don't forget to log the message
         self.database
             .insert_message(
                 message.id.0 as i64,
@@ -92,6 +83,16 @@ impl DiscordLogger {
 
 #[async_trait]
 impl EventHandler for DiscordLogger {
+    // when joining a new guild, store its information
+    async fn guild_create(&self, _ctx: Context, guild: Guild) {
+        self.database
+            .insert_guild(guild.id.0 as i64, Some(&guild.name))
+            .await
+            .expect("failed to log guild");
+
+        println!("logged new guild: {}", guild.name)
+    }
+
     // log every message and its reactions, etc
     async fn message(&self, ctx: Context, new_message: Message) {
         println!(
@@ -115,7 +116,26 @@ impl EventHandler for DiscordLogger {
         }
     }
 
-    async fn ready(&self, _ctx: Context, _data_about_bot: Ready) {
-        println!("client is now ready");
+    async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
+        // set creepy status
+        ctx.set_activity(Activity::watching("you")).await;
+
+        // insert all guilds
+        // technically, get_guilds will fail to get all guilds after # > 100
+        println!("logging all current guilds");
+        join_all(
+            ctx.http
+                .get_guilds(None, None)
+                .await
+                .expect("failed to fetch guild info")
+                .iter()
+                .map(|guild| {
+                    self.database
+                        .insert_guild(guild.id.0 as i64, Some(&guild.name))
+                }),
+        )
+        .await;
+
+        println!("client is now ready and listening");
     }
 }

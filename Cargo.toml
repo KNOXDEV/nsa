@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serenity = { version = "0.11.5", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "chrono", "cache"] }
+serenity = { version = "0.11.5", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "chrono"] }
 tokio-postgres = { version = "0.7.6", features = ["with-chrono-0_4"] }
 tokio = { version = "1.20.1", features = ["macros", "rt-multi-thread"] }
 rand = "0.8.5"
