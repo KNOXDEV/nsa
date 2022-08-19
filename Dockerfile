@@ -7,16 +7,17 @@ RUN cargo init . --name nsa
 COPY Cargo.toml .
 COPY Cargo.lock .
 RUN cargo build --profile $profile
-RUN rm -rf ./src/
-
+RUN rm -rf ./src
 # now just compile the source code when it changes
-FROM builder AS installer
-COPY src ./src
+COPY ./src ./src
+# The last modified attribute of main.rs needs to be updated manually,
+# otherwise cargo won't rebuild it.
+RUN touch -a -m ./src/main.rs
 RUN cargo build --profile $profile
 
 # copy the result binary to a slim image
 FROM debian:buster-slim
 ARG profile
 # if profile isn't set, the default is dev, which outputs to the unusual path "debug"
-COPY --from=installer /target/${profile:-debug}/nsa /usr/local/bin
+COPY --from=builder /target/${profile:-debug}/nsa /usr/local/bin
 CMD ["nsa"]

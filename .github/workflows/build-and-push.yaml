@@ -28,7 +28,6 @@ jobs:
       - name: Build, tag, and push
         uses: docker/build-push-action@v3.1.1
         with:
-          no-cache: true
           build-args: profile=release
           push: true
           tags: "${{ secrets.REGISTRY }}/nsa:${{ env.VERSION }}"
