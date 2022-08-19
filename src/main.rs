@@ -14,7 +14,8 @@ async fn main() {
     let pg_host = env::var("PG_HOST").expect("no environment variable PG_HOST provided");
     let pg_password =
         env::var("PG_PASSWORD").expect("no environment variable PG_PASSWORD provided");
-    let config = format!("host={} user=postgres password={}", pg_host, pg_password);
+    let pg_user = env::var("PG_USER").expect("no environment variable PG_USER provided");
+    let config = format!("host={} user={} password={}", pg_host, pg_user, pg_password);
     let (postgres_client, connection) = tokio_postgres::connect(&config, tokio_postgres::NoTls)
         .await
         .expect("failed to connect to postgres server");
