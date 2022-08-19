@@ -7,7 +7,7 @@ RUN cargo init . --name nsa
 COPY Cargo.toml .
 COPY Cargo.lock .
 RUN cargo build --profile $profile
-RUN rm -rf ./src
+RUN rm -rf ./src/
 
 # now just compile the source code when it changes
 FROM builder AS installer
