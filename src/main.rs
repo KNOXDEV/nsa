@@ -12,7 +12,9 @@ use tables::init_tables;
 async fn main() {
     // connect to locally running postgres
     let pg_host = env::var("PG_HOST").expect("no environment variable PG_HOST provided");
-    let config = format!("host={} user=postgres", pg_host);
+    let pg_password =
+        env::var("PG_PASSWORD").expect("no environment variable PG_PASSWORD provided");
+    let config = format!("host={} user=postgres password={}", pg_host, pg_password);
     let (postgres_client, connection) = tokio_postgres::connect(&config, tokio_postgres::NoTls)
         .await
         .expect("failed to connect to postgres server");
