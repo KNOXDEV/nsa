@@ -107,8 +107,8 @@ impl EventHandler for DiscordLogger {
             .await
             .expect("failed to save logged message to database");
 
-        // randomly react to incoming messages 0.5% of the time
-        if rand::random::<f64>() < 0.005 {
+        // randomly react to incoming messages 0.1% of the time
+        if rand::random::<f64>() < 0.001 {
             new_message
                 .react(ctx, ReactionType::Unicode(String::from("👀")))
                 .await
@@ -118,7 +118,7 @@ impl EventHandler for DiscordLogger {
 
     async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
         // set creepy status
-        ctx.set_activity(Activity::watching("you")).await;
+        ctx.set_activity(Activity::watching("all of us")).await;
 
         // insert all guilds
         // technically, get_guilds will fail to get all guilds after # > 100
