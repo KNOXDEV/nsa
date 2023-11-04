@@ -4,9 +4,11 @@ use std::env;
 
 mod logger;
 mod tables;
+mod link_rewriter;
 
 use logger::DiscordLogger;
 use tables::init_tables;
+use crate::link_rewriter::DiscordLinkRewriter;
 
 #[tokio::main]
 async fn main() {
@@ -34,6 +36,7 @@ async fn main() {
 
     let mut client = Client::builder(&token, intents)
         .event_handler(DiscordLogger::new(postgres_client).await)
+        .event_handler(DiscordLinkRewriter::new())
         .await
         .expect("discord auth failed");
 

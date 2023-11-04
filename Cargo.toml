@@ -11,3 +11,5 @@ tokio-postgres = { version = "0.7.6", features = ["with-chrono-0_4"] }
 tokio = { version = "1.20.1", features = ["macros", "rt-multi-thread"] }
 rand = "0.8.5"
 chrono = "0.4.22"
+regex = "1.10.2"
+lazy_static = "1.4.0"

@@ -1,7 +1,7 @@
 # you can set --build-arg profile=release to get a release build
 
 # create a dummy project with the same dependencies to precompile them
-FROM rust:1.63 AS builder
+FROM rust:1.65 AS builder
 ARG profile=dev
 RUN cargo init . --name nsa
 COPY Cargo.toml .
