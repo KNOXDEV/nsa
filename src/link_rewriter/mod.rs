@@ -34,6 +34,17 @@ fn rewrite_captured_link(caps: Captures) -> Option<String> {
                     .join(""),
                 )
             }
+            "bsky.app" => {
+                let original_url = original_message.as_str().to_owned();
+                Some(
+                    [
+                        &original_url[..(mat.start() - original_message.start())],
+                        "fxbsky.app",
+                        &original_url[(mat.end() - original_message.start())..],
+                    ]
+                    .join(""),
+                )
+            }
             "pixiv.net" => {
                 let original_url = original_message.as_str().to_owned();
                 Some(
@@ -155,8 +166,27 @@ mod test {
     }
 
     #[test]
+    fn rewrite_bluesky() {
+        let test_link = "https://bsky.app/profile/FAKEHANDLE.bsky.social/post/FAKEPOST";
+
+        let result_link = rewrite_captured_link(URL_REGEX.captures(test_link).unwrap()).unwrap();
+        assert_eq!(
+            result_link,
+            "https://fxbsky.app/profile/FAKEHANDLE.bsky.social/post/FAKEPOST"
+        )
+    }
+
+    #[test]
     fn dont_rewrite_fxtwitter() {
         let test_link = "https://fxtwitter.com/FAKEURL";
+
+        let result_link = rewrite_captured_link(URL_REGEX.captures(test_link).unwrap());
+        assert_eq!(result_link, None)
+    }
+
+    #[test]
+    fn dont_rewrite_fxbsky() {
+        let test_link = "https://fxbsky.app/profile/FAKEHANDLE.bsky.social/post/FAKEPOST";
 
         let result_link = rewrite_captured_link(URL_REGEX.captures(test_link).unwrap());
         assert_eq!(result_link, None)
