@@ -47,10 +47,12 @@ in {
         PG_PASSWORD=$(${pkgs.gawk}/bin/awk -F= '/^PG_PASSWORD=/ {
           print substr($0, index($0, "=") + 1)
         }' ${cfg.environmentFile})
+        # psql's :'pw' interpolation requires script-mode input — `-c` sends the
+        # command unparsed to the server, so we pipe via stdin instead.
         ${pkgs.sudo}/bin/sudo -u postgres ${config.services.postgresql.package}/bin/psql \
           -v ON_ERROR_STOP=1 \
           -v "pw=$PG_PASSWORD" \
-          -c "ALTER USER nsa WITH PASSWORD :'pw';"
+          <<<"ALTER USER nsa WITH PASSWORD :'pw';"
       '';
     };
 
