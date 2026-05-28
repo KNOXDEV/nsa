@@ -20,7 +20,7 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./package.nix {};
+      default = pkgs.internal.nsa;
       description = "The nsa package to run.";
     };
   };

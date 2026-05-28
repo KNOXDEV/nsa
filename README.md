@@ -18,12 +18,26 @@ Well, it's private for obvious reasons.
 But you can make your own and follow
 [this guide](https://discordjs.guide/preparations/adding-your-bot-to-servers.html#bot-invite-links).
 
-### quick start
+### quick start (local dev)
+
+Uses a Nix devshell with a throwaway local Postgres managed by process-compose:
+
 ```bash
-docker compose up
+nix develop                # rust toolchain + postgres + process-compose
+process-compose            # starts postgres (init + create db on first run)
+# in a second `nix develop` shell:
+DISCORD_TOKEN=... cargo run
 ```
 
-### build release images
+Quitting process-compose tears the database down — no stale cluster. Postgres
+listens on a project-local unix socket (`.pgdata/`), so there are no port
+conflicts and no TCP exposure.
+
+### deploy
+
+The bot ships as a flake package (`nix build`) and a NixOS module
+(`nixosModules.default`, see `module.nix`).
+
 ```bash
-docker build . -t nsa --build-arg profile=release
+nix build                  # build the binary
 ```

@@ -18,7 +18,28 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "scaffold": "scaffold"
+      }
+    },
+    "scaffold": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1780012541,
+        "narHash": "sha256-dPEpRodnK90cIEsvfHakxccbZzbpEC9GASDGq4LvIec=",
+        "owner": "KNOXDEV",
+        "repo": "scaffold.nix",
+        "rev": "1f5ab39635ad4015648b8a2d43e35786d0655427",
+        "type": "github"
+      },
+      "original": {
+        "owner": "KNOXDEV",
+        "repo": "scaffold.nix",
+        "type": "github"
       }
     }
   },

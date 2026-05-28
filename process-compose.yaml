@@ -1,0 +1,28 @@
+# Local dev Postgres, managed by process-compose. Reads PGDATA/PG_USER from the
+# nix devshell env. Run `process-compose` inside `nix develop`, then `cargo run`.
+version: "0.5"
+processes:
+  pg-init:
+    command: |
+      [ -d "$PGDATA/base" ] || initdb -U nsa --auth=trust
+
+  postgres:
+    command: postgres -D "$PGDATA" -k "$PGDATA" -c listen_addresses=
+    depends_on:
+      pg-init:
+        condition: process_completed_successfully
+    readiness_probe:
+      exec:
+        command: pg_isready -h "$PGDATA" -U nsa
+      initial_delay_seconds: 1
+      period_seconds: 1
+      timeout_seconds: 5
+      failure_threshold: 30
+
+  pg-createdb:
+    command: |
+      until pg_isready -h "$PGDATA" -U nsa -q; do sleep 0.5; done
+      createdb -h "$PGDATA" -U nsa nsa 2>/dev/null || true
+    depends_on:
+      postgres:
+        condition: process_healthy
