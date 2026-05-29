@@ -24,12 +24,6 @@
           inherit (modules.nixos) nsa;
         };
 
-        overlays = _: {
-          default = final: _prev: {
-            nsa = final.callPackage ./nix/packages/nsa.nix {};
-          };
-        };
-
         shells = {shells, ...}: {
           inherit (shells) default;
         };
