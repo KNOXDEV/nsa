@@ -11,8 +11,8 @@ use crate::link_rewriter::DiscordLinkRewriter;
 use logger::DiscordLogger;
 use tables::init_tables;
 
-// Serenity 0.11's ClientBuilder::event_handler replaces rather than appends;
-// the last call wins. Wrapping both handlers behind one EventHandler keeps both
+// Serenity's ClientBuilder::event_handler replaces rather than appends; the
+// last call wins. Wrapping both handlers behind one EventHandler keeps both
 // alive.
 struct Handlers {
     logger: DiscordLogger,
@@ -33,8 +33,8 @@ impl EventHandler for Handlers {
         self.logger.ready(ctx, data).await;
     }
 
-    async fn guild_create(&self, ctx: Context, guild: Guild) {
-        self.logger.guild_create(ctx, guild).await;
+    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
+        self.logger.guild_create(ctx, guild, is_new).await;
     }
 }
 

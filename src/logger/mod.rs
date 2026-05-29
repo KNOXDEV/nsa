@@ -1,11 +1,12 @@
 mod queries;
 
-use chrono::NaiveDateTime;
+use chrono::DateTime;
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::futures::future::join_all;
+use serenity::gateway::ActivityData;
 use serenity::model::channel::{Channel, Message, ReactionType};
-use serenity::model::gateway::{Activity, Ready};
+use serenity::model::gateway::Ready;
 use serenity::model::guild::Guild;
 
 use crate::logger::queries::Database;
@@ -26,13 +27,17 @@ impl DiscordLogger {
         ctx: &Context,
         message: &Message,
     ) -> Result<u64, tokio_postgres::Error> {
-        let id = message.id.0 as i64;
-        let timestamp = NaiveDateTime::from_timestamp(message.timestamp.unix_timestamp(), 0);
+        let id = message.id.get() as i64;
+        let timestamp = DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0)
+            .expect("invalid message timestamp")
+            .naive_utc();
         let edit_timestamp = message.edited_timestamp.map_or(timestamp, |ts| {
-            NaiveDateTime::from_timestamp(ts.unix_timestamp(), 0)
+            DateTime::from_timestamp(ts.unix_timestamp(), 0)
+                .expect("invalid message edit timestamp")
+                .naive_utc()
         });
-        let channel_id = message.channel_id.0 as i64;
-        let user_id = message.author.id.0 as i64;
+        let channel_id = message.channel_id.get() as i64;
+        let user_id = message.author.id.get() as i64;
         let username = &message.author.name;
 
         // if we haven't logged this user before
@@ -46,13 +51,13 @@ impl DiscordLogger {
         {
             // this does not store the guild name, but if its already there will not overwrite it
             self.database
-                .insert_guild(channel.guild_id.0 as i64, None)
+                .insert_guild(channel.guild_id.get() as i64, None)
                 .await?;
             self.database
                 .insert_channel(
                     channel_id,
                     Some(&channel.name),
-                    Some(channel.guild_id.0 as i64),
+                    Some(channel.guild_id.get() as i64),
                     id,
                     id,
                 )
@@ -68,12 +73,12 @@ impl DiscordLogger {
         // finally, don't forget to log the message
         self.database
             .insert_message(
-                message.id.0 as i64,
+                message.id.get() as i64,
                 &message.content,
                 timestamp,
                 edit_timestamp,
-                message.author.id.0 as i64,
-                message.channel_id.0 as i64,
+                message.author.id.get() as i64,
+                message.channel_id.get() as i64,
             )
             .await
 
@@ -84,9 +89,9 @@ impl DiscordLogger {
 #[async_trait]
 impl EventHandler for DiscordLogger {
     // when joining a new guild, store its information
-    async fn guild_create(&self, _ctx: Context, guild: Guild) {
+    async fn guild_create(&self, _ctx: Context, guild: Guild, _is_new: Option<bool>) {
         self.database
-            .insert_guild(guild.id.0 as i64, Some(&guild.name))
+            .insert_guild(guild.id.get() as i64, Some(&guild.name))
             .await
             .expect("failed to log guild");
 
@@ -118,7 +123,7 @@ impl EventHandler for DiscordLogger {
 
     async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
         // set creepy status
-        ctx.set_activity(Activity::watching("all of us")).await;
+        ctx.set_activity(Some(ActivityData::watching("all of us")));
 
         // insert all guilds
         // technically, get_guilds will fail to get all guilds after # > 100
@@ -131,7 +136,7 @@ impl EventHandler for DiscordLogger {
                 .iter()
                 .map(|guild| {
                     self.database
-                        .insert_guild(guild.id.0 as i64, Some(&guild.name))
+                        .insert_guild(guild.id.get() as i64, Some(&guild.name))
                 }),
         )
         .await;

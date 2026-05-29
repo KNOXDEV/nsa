@@ -4,10 +4,10 @@
 }:
 rustPlatform.buildRustPackage {
   pname = "nsa";
-  version = "0.3.1";
+  version = "0.3.2";
   src = ../../.;
 
-  cargoHash = "sha256-sgE68LZ7SZqdB1j5lEpD7P6UlAcgZV2iYHmErwNgUZY=";
+  cargoHash = "sha256-WjiTpDUlXy9yiMjk059pDVW2iFEQSEz1O9aOvk1LpkU=";
 
   meta = {
     description = "Discord bot that logs all messages to Postgres";
