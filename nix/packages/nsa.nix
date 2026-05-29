@@ -7,7 +7,7 @@ rustPlatform.buildRustPackage {
   version = "0.3.1";
   src = ../../.;
 
-  cargoLock.lockFile = ../../Cargo.lock;
+  cargoHash = "sha256-sgE68LZ7SZqdB1j5lEpD7P6UlAcgZV2iYHmErwNgUZY=";
 
   meta = {
     description = "Discord bot that logs all messages to Postgres";
