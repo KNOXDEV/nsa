@@ -29,11 +29,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1780018158,
-        "narHash": "sha256-zUIRvD8H8kmPU40w56H4DbP07OsmYB9xhUBXaDJ4Jf0=",
+        "lastModified": 1780021195,
+        "narHash": "sha256-KG9M6f7bFGkDG20uvASmxbiZYxu76CFPclfbLJ/eZuo=",
         "owner": "KNOXDEV",
         "repo": "scaffold.nix",
-        "rev": "2539d162cc55a8edf670f3ed19a3e210dad2ff1b",
+        "rev": "b183080847dd42df213f7284557c9b2dfafc3ae5",
         "type": "github"
       },
       "original": {
