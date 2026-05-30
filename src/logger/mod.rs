@@ -43,10 +43,8 @@ impl DiscordLogger {
         // if we haven't logged this user before
         self.database.insert_user(user_id, username).await?;
 
-        // if this message was sent in a GuildChannel, record both the guild and the channel.
-        // the channel fetch is non-fatal: on failure we still insert a bare channel row so the
-        // message FK holds, logging the message with degraded channel metadata rather than
-        // panicking. insert_channel is ON CONFLICT DO NOTHING, so an enriched row is never clobbered.
+        // channel fetch is non-fatal: on failure we still record a degraded channel row so the
+        // message FK holds. insert_channel COALESCE-upserts, so a later fetch enriches the row.
         match message.channel(ctx).await {
             Ok(Channel::Guild(channel)) => {
                 // this does not store the guild name, but if its already there will not overwrite it
@@ -63,16 +61,14 @@ impl DiscordLogger {
                     )
                     .await?;
             }
-            // a genuine non-guild channel (probably a private message): record a bare row.
+            // non-guild channel (e.g. DM): bare row, no guild.
             Ok(_) => {
                 self.database
                     .insert_channel(channel_id, None, None, id, id)
                     .await?;
             }
-            // fetch failed: fall back to the guild_id the gateway already put on the message so
-            // a guild message still records its real guild instead of a poisoned NULL. (Note
-            // REST-fetched/backfilled messages omit guild_id, hence the classifier above runs
-            // first.) insert_channel's enrichment upsert fills the name in on a later success.
+            // fetch failed: fall back to the gateway's guild_id so a guild message still records
+            // its guild rather than NULL (None for DMs/backfills). a later fetch enriches the name.
             Err(e) => {
                 eprintln!("failed to fetch channel info for message {id}: {e}");
                 let guild_id = message.guild_id.map(|g| g.get() as i64);
@@ -219,8 +215,7 @@ impl EventHandler for DiscordLogger {
     }
 
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        // soft-fail: a transient DB error should drop this event, not panic the task
-        // (matches log_reaction's own recoverable-error handling)
+        // soft-fail: drop the event on a transient DB error rather than panicking the task
         if let Err(e) = self.log_reaction(&ctx, &add_reaction, false).await {
             eprintln!("failed to log added reaction: {e}");
         }

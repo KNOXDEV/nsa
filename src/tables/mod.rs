@@ -21,7 +21,7 @@ pub async fn init_tables(client: &Client) -> Result<(), Error> {
     client.query_opt(MESSAGES_TABLE, &[]).await?;
 
     client.query_opt(REACTIONS_TABLE, &[]).await?;
-    // depends on the reactions table existing; CREATE OR REPLACE so it re-applies on each boot
+    // view over reactions; must run after that table is created
     client.query_opt(CURRENT_REACTIONS_VIEW, &[]).await?;
     client.query_opt(ATTACHMENTS_TABLE, &[]).await?;
 
