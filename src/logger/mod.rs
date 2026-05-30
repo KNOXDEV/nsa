@@ -1,11 +1,11 @@
 mod queries;
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::futures::future::join_all;
 use serenity::gateway::ActivityData;
-use serenity::model::channel::{Channel, Message, ReactionType};
+use serenity::model::channel::{Channel, Message, Reaction, ReactionType};
 use serenity::model::gateway::Ready;
 use serenity::model::guild::Guild;
 
@@ -26,7 +26,7 @@ impl DiscordLogger {
         &self,
         ctx: &Context,
         message: &Message,
-    ) -> Result<u64, tokio_postgres::Error> {
+    ) -> Result<(), tokio_postgres::Error> {
         let id = message.id.get() as i64;
         let timestamp = DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0)
             .expect("invalid message timestamp")
@@ -43,31 +43,38 @@ impl DiscordLogger {
         // if we haven't logged this user before
         self.database.insert_user(user_id, username).await?;
 
-        // if this message was sent in a GuildChannel, record both the guild and the channel
-        if let Channel::Guild(channel) = message
-            .channel(ctx)
-            .await
-            .expect("failed to get message's guild info")
-        {
-            // this does not store the guild name, but if its already there will not overwrite it
-            self.database
-                .insert_guild(channel.guild_id.get() as i64, None)
-                .await?;
-            self.database
-                .insert_channel(
-                    channel_id,
-                    Some(&channel.name),
-                    Some(channel.guild_id.get() as i64),
-                    id,
-                    id,
-                )
-                .await?;
-        }
-        // otherwise, only record the channel (which is probably a private message)
-        else {
-            self.database
-                .insert_channel(channel_id, None, None, id, id)
-                .await?;
+        // if this message was sent in a GuildChannel, record both the guild and the channel.
+        // the channel fetch is non-fatal: on failure we still insert a bare channel row so the
+        // message FK holds, logging the message with degraded channel metadata rather than
+        // panicking. insert_channel is ON CONFLICT DO NOTHING, so an enriched row is never clobbered.
+        match message.channel(ctx).await {
+            Ok(Channel::Guild(channel)) => {
+                // this does not store the guild name, but if its already there will not overwrite it
+                self.database
+                    .insert_guild(channel.guild_id.get() as i64, None)
+                    .await?;
+                self.database
+                    .insert_channel(
+                        channel_id,
+                        Some(&channel.name),
+                        Some(channel.guild_id.get() as i64),
+                        id,
+                        id,
+                    )
+                    .await?;
+            }
+            // otherwise, only record the channel (which is probably a private message)
+            Ok(_) => {
+                self.database
+                    .insert_channel(channel_id, None, None, id, id)
+                    .await?;
+            }
+            Err(e) => {
+                eprintln!("failed to fetch channel info for message {id}: {e}");
+                self.database
+                    .insert_channel(channel_id, None, None, id, id)
+                    .await?;
+            }
         }
 
         // finally, don't forget to log the message
@@ -80,9 +87,91 @@ impl DiscordLogger {
                 message.author.id.get() as i64,
                 message.channel_id.get() as i64,
             )
-            .await
+            .await?;
 
-        // TODO: log reactions, attachments, etc.
+        // record any attachments (we keep the recoverable CDN url, not the file itself)
+        for attachment in &message.attachments {
+            self.database
+                .insert_attachment(
+                    attachment.id.get() as i64,
+                    &attachment.filename,
+                    &attachment.url,
+                    message.id.get() as i64,
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn log_reaction(
+        &self,
+        ctx: &Context,
+        reaction: &Reaction,
+        removed: bool,
+    ) -> Result<(), tokio_postgres::Error> {
+        // reacting user (gateway sends this for add/remove)
+        let Some(user_id) = reaction.user_id else {
+            eprintln!("reaction with no user_id, skipping");
+            return Ok(());
+        };
+        let user_id_i64 = user_id.get() as i64;
+
+        // username: prefer member (present on guild adds), else fetch via REST
+        let username = match &reaction.member {
+            Some(member) => member.user.name.clone(),
+            None => match user_id.to_user(&ctx).await {
+                Ok(user) => user.name,
+                Err(e) => {
+                    eprintln!("failed to resolve reacting user {user_id_i64}: {e}");
+                    return Ok(());
+                }
+            },
+        };
+        self.database.insert_user(user_id_i64, &username).await?;
+
+        // backfill the message if never logged (reaction.message_id FK)
+        let message_id = reaction.message_id.get() as i64;
+        if !self.database.message_exists(message_id).await? {
+            match reaction.channel_id.message(&ctx, reaction.message_id).await {
+                Ok(message) => self.log_message(ctx, &message).await?,
+                Err(e) => {
+                    eprintln!("failed to backfill message {message_id}: {e}");
+                    return Ok(());
+                }
+            }
+        }
+
+        // resolve emoji: custom -> catalog + id; unicode -> name only.
+        // ReactionType is #[non_exhaustive] => catch-all arm required.
+        let (emoji_id, emoji_name) = match &reaction.emoji {
+            ReactionType::Custom { id, name, .. } => {
+                let eid = id.get() as i64;
+                let ename = name.clone().unwrap_or_else(|| id.to_string());
+                self.database.insert_emoji(eid, &ename).await?;
+                (Some(eid), ename)
+            }
+            ReactionType::Unicode(unicode) => (None, unicode.clone()),
+            other => {
+                eprintln!("unhandled reaction type {other:?}, skipping");
+                return Ok(());
+            }
+        };
+
+        // the gateway carries no reaction timestamp and these events are always live,
+        // so the logging time is effectively the reaction time
+        let reacted_at = Utc::now().naive_utc();
+        self.database
+            .insert_reaction(
+                message_id,
+                emoji_id,
+                &emoji_name,
+                user_id_i64,
+                removed,
+                reacted_at,
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -119,6 +208,18 @@ impl EventHandler for DiscordLogger {
                 .await
                 .expect("failed to react creepily");
         }
+    }
+
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        self.log_reaction(&ctx, &add_reaction, false)
+            .await
+            .expect("failed to log added reaction");
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        self.log_reaction(&ctx, &removed_reaction, true)
+            .await
+            .expect("failed to log removed reaction");
     }
 
     async fn ready(&self, ctx: Context, _data_about_bot: Ready) {

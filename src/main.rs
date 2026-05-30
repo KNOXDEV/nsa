@@ -36,6 +36,14 @@ impl EventHandler for Handlers {
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         self.logger.guild_create(ctx, guild, is_new).await;
     }
+
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        self.logger.reaction_add(ctx, add_reaction).await;
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        self.logger.reaction_remove(ctx, removed_reaction).await;
+    }
 }
 
 #[tokio::main]
@@ -60,7 +68,9 @@ async fn main() {
 
     // connect to discord
     let token = env::var("DISCORD_TOKEN").expect("no environment variable DISCORD_TOKEN provided");
-    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+    let intents = GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     let handlers = Handlers {
         logger: DiscordLogger::new(postgres_client).await,
