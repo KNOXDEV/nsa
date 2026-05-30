@@ -63,14 +63,12 @@ impl DiscordLogger {
                     )
                     .await?;
             }
-            // otherwise, only record the channel (which is probably a private message)
-            Ok(_) => {
-                self.database
-                    .insert_channel(channel_id, None, None, id, id)
-                    .await?;
-            }
-            Err(e) => {
-                eprintln!("failed to fetch channel info for message {id}: {e}");
+            // either a non-guild channel (probably a private message) or a transient fetch
+            // failure: in both cases record a bare channel row so the message FK holds.
+            other => {
+                if let Err(e) = other {
+                    eprintln!("failed to fetch channel info for message {id}: {e}");
+                }
                 self.database
                     .insert_channel(channel_id, None, None, id, id)
                     .await?;
@@ -80,12 +78,12 @@ impl DiscordLogger {
         // finally, don't forget to log the message
         self.database
             .insert_message(
-                message.id.get() as i64,
+                id,
                 &message.content,
                 timestamp,
                 edit_timestamp,
-                message.author.id.get() as i64,
-                message.channel_id.get() as i64,
+                user_id,
+                channel_id,
             )
             .await?;
 
@@ -96,7 +94,7 @@ impl DiscordLogger {
                     attachment.id.get() as i64,
                     &attachment.filename,
                     &attachment.url,
-                    message.id.get() as i64,
+                    id,
                 )
                 .await?;
         }
@@ -211,15 +209,17 @@ impl EventHandler for DiscordLogger {
     }
 
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        self.log_reaction(&ctx, &add_reaction, false)
-            .await
-            .expect("failed to log added reaction");
+        // soft-fail: a transient DB error should drop this event, not panic the task
+        // (matches log_reaction's own recoverable-error handling)
+        if let Err(e) = self.log_reaction(&ctx, &add_reaction, false).await {
+            eprintln!("failed to log added reaction: {e}");
+        }
     }
 
     async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
-        self.log_reaction(&ctx, &removed_reaction, true)
-            .await
-            .expect("failed to log removed reaction");
+        if let Err(e) = self.log_reaction(&ctx, &removed_reaction, true).await {
+            eprintln!("failed to log removed reaction: {e}");
+        }
     }
 
     async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
