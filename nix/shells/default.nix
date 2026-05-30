@@ -9,6 +9,9 @@ pkgs.mkShell {
     pkgs.postgresql
     pkgs.process-compose
   ];
+  env = {
+    RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+  };
   shellHook = ''
     export PGDATA="$PWD/.pgdata"
     export PG_HOST="$PGDATA" # socket dir, libpq-style — matches module.nix
