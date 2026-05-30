@@ -6,6 +6,7 @@ const USERS_TABLE: &str = include_str!("./users.sql");
 const MEMBERS_TABLE: &str = include_str!("./members.sql");
 const EMOJI_TABLE: &str = include_str!("./emojis.sql");
 const REACTIONS_TABLE: &str = include_str!("./reactions.sql");
+const CURRENT_REACTIONS_VIEW: &str = include_str!("./current-reactions.sql");
 const ATTACHMENTS_TABLE: &str = include_str!("./attachments.sql");
 const MESSAGES_TABLE: &str = include_str!("./messages.sql");
 
@@ -20,6 +21,8 @@ pub async fn init_tables(client: &Client) -> Result<(), Error> {
     client.query_opt(MESSAGES_TABLE, &[]).await?;
 
     client.query_opt(REACTIONS_TABLE, &[]).await?;
+    // depends on the reactions table existing; CREATE OR REPLACE so it re-applies on each boot
+    client.query_opt(CURRENT_REACTIONS_VIEW, &[]).await?;
     client.query_opt(ATTACHMENTS_TABLE, &[]).await?;
 
     Ok(())

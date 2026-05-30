@@ -63,14 +63,24 @@ impl DiscordLogger {
                     )
                     .await?;
             }
-            // either a non-guild channel (probably a private message) or a transient fetch
-            // failure: in both cases record a bare channel row so the message FK holds.
-            other => {
-                if let Err(e) = other {
-                    eprintln!("failed to fetch channel info for message {id}: {e}");
-                }
+            // a genuine non-guild channel (probably a private message): record a bare row.
+            Ok(_) => {
                 self.database
                     .insert_channel(channel_id, None, None, id, id)
+                    .await?;
+            }
+            // fetch failed: fall back to the guild_id the gateway already put on the message so
+            // a guild message still records its real guild instead of a poisoned NULL. (Note
+            // REST-fetched/backfilled messages omit guild_id, hence the classifier above runs
+            // first.) insert_channel's enrichment upsert fills the name in on a later success.
+            Err(e) => {
+                eprintln!("failed to fetch channel info for message {id}: {e}");
+                let guild_id = message.guild_id.map(|g| g.get() as i64);
+                if let Some(guild_id) = guild_id {
+                    self.database.insert_guild(guild_id, None).await?;
+                }
+                self.database
+                    .insert_channel(channel_id, None, guild_id, id, id)
                     .await?;
             }
         }
