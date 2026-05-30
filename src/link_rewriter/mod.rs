@@ -21,7 +21,7 @@ fn rewrite_captured_link(caps: Captures) -> Option<String> {
         caps.get(1).unwrap().as_str()
     );
 
-    return match caps.get(1) {
+    match caps.get(1) {
         Some(mat) => match mat.as_str() {
             "twitter.com" | "x.com" => {
                 let original_url = original_message.as_str().to_owned();
@@ -64,10 +64,10 @@ fn rewrite_captured_link(caps: Captures) -> Option<String> {
             _ => None,
         },
         _ => None,
-    };
+    }
 }
 
-fn should_delete_og_message(links: &Vec<String>, original_message: &str) -> bool {
+fn should_delete_og_message(links: &[String], original_message: &str) -> bool {
     links.len() == 1 && !original_message.trim().contains(" ")
 }
 
@@ -132,7 +132,7 @@ impl EventHandler for DiscordLinkRewriter {
         }
     }
 
-    async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
+    async fn ready(&self, _ctx: Context, _data_about_bot: Ready) {
         println!("link rewriter is online");
     }
 }
