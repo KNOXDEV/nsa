@@ -9,6 +9,20 @@ const INSERT_ATTACHMENT_QUERY: &str = include_str!("./insert-attachment.sql");
 const INSERT_EMOJI_QUERY: &str = include_str!("./insert-emoji.sql");
 const INSERT_REACTION_QUERY: &str = include_str!("./insert-reaction.sql");
 const MESSAGE_EXISTS_QUERY: &str = include_str!("./message-exists.sql");
+// backfill query SQL lives next to the backfill module (CLAUDE.md's "SQL next to its module"),
+// but the prepared statements over it stay centralized in this one Database struct.
+const LIST_BACKFILL_CHANNELS_QUERY: &str =
+    include_str!("../../backfill/queries/list-backfill-channels.sql");
+const GET_BACKFILL_STATE_QUERY: &str =
+    include_str!("../../backfill/queries/get-backfill-state.sql");
+const UPSERT_BACKFILL_STATE_QUERY: &str =
+    include_str!("../../backfill/queries/upsert-backfill-state.sql");
+const BUMP_LAST_MESSAGE_ID_QUERY: &str =
+    include_str!("../../backfill/queries/bump-last-message-id.sql");
+const UPSERT_REACTION_COUNT_CUSTOM_QUERY: &str =
+    include_str!("../../backfill/queries/upsert-reaction-count-custom.sql");
+const UPSERT_REACTION_COUNT_UNICODE_QUERY: &str =
+    include_str!("../../backfill/queries/upsert-reaction-count-unicode.sql");
 
 pub struct Database {
     postgres_client: Client,
@@ -20,6 +34,12 @@ pub struct Database {
     insert_emoji_statement: Statement,
     insert_reaction_statement: Statement,
     message_exists_statement: Statement,
+    list_backfill_channels_statement: Statement,
+    get_backfill_state_statement: Statement,
+    upsert_backfill_state_statement: Statement,
+    bump_last_message_id_statement: Statement,
+    upsert_reaction_count_custom_statement: Statement,
+    upsert_reaction_count_unicode_statement: Statement,
 }
 
 impl Database {
@@ -33,6 +53,12 @@ impl Database {
             insert_emoji_statement,
             insert_reaction_statement,
             message_exists_statement,
+            list_backfill_channels_statement,
+            get_backfill_state_statement,
+            upsert_backfill_state_statement,
+            bump_last_message_id_statement,
+            upsert_reaction_count_custom_statement,
+            upsert_reaction_count_unicode_statement,
         ) = tokio::try_join!(
             postgres_client.prepare(INSERT_MESSAGE_QUERY),
             postgres_client.prepare(INSERT_USER_QUERY),
@@ -42,6 +68,12 @@ impl Database {
             postgres_client.prepare(INSERT_EMOJI_QUERY),
             postgres_client.prepare(INSERT_REACTION_QUERY),
             postgres_client.prepare(MESSAGE_EXISTS_QUERY),
+            postgres_client.prepare(LIST_BACKFILL_CHANNELS_QUERY),
+            postgres_client.prepare(GET_BACKFILL_STATE_QUERY),
+            postgres_client.prepare(UPSERT_BACKFILL_STATE_QUERY),
+            postgres_client.prepare(BUMP_LAST_MESSAGE_ID_QUERY),
+            postgres_client.prepare(UPSERT_REACTION_COUNT_CUSTOM_QUERY),
+            postgres_client.prepare(UPSERT_REACTION_COUNT_UNICODE_QUERY),
         )
         .expect("failed to generate prepared statements");
 
@@ -55,6 +87,12 @@ impl Database {
             insert_emoji_statement,
             insert_reaction_statement,
             message_exists_statement,
+            list_backfill_channels_statement,
+            get_backfill_state_statement,
+            upsert_backfill_state_statement,
+            bump_last_message_id_statement,
+            upsert_reaction_count_custom_statement,
+            upsert_reaction_count_unicode_statement,
         }
     }
 
@@ -154,5 +192,86 @@ impl Database {
             .query_opt(&self.message_exists_statement, &[&id])
             .await?
             .is_some())
+    }
+
+    // every channel we've seen a message in, with its high-water last_message_id (the catch-up floor)
+    pub async fn list_backfill_channels(&self) -> Result<Vec<(i64, i64)>, Error> {
+        Ok(self
+            .postgres_client
+            .query(&self.list_backfill_channels_statement, &[])
+            .await?
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
+    // historical-sweep checkpoint: (oldest_backfilled_id, complete), or None if never swept
+    pub async fn backfill_state(
+        &self,
+        channel_id: i64,
+    ) -> Result<Option<(Option<i64>, bool)>, Error> {
+        Ok(self
+            .postgres_client
+            .query_opt(&self.get_backfill_state_statement, &[&channel_id])
+            .await?
+            .map(|row| (row.get(0), row.get(1))))
+    }
+
+    pub async fn upsert_backfill_state(
+        &self,
+        channel_id: i64,
+        oldest: Option<i64>,
+        complete: bool,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.upsert_backfill_state_statement,
+                &[&channel_id, &oldest, &complete],
+            )
+            .await
+    }
+
+    pub async fn bump_last_message_id(
+        &self,
+        channel_id: i64,
+        message_id: i64,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.bump_last_message_id_statement,
+                &[&channel_id, &message_id],
+            )
+            .await
+    }
+
+    pub async fn upsert_reaction_count_custom(
+        &self,
+        message_id: i64,
+        emoji_id: i64,
+        emoji_name: &str,
+        count: i32,
+        observed_at: NaiveDateTime,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.upsert_reaction_count_custom_statement,
+                &[&message_id, &emoji_id, &emoji_name, &count, &observed_at],
+            )
+            .await
+    }
+
+    pub async fn upsert_reaction_count_unicode(
+        &self,
+        message_id: i64,
+        emoji_name: &str,
+        count: i32,
+        observed_at: NaiveDateTime,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.upsert_reaction_count_unicode_statement,
+                &[&message_id, &emoji_name, &count, &observed_at],
+            )
+            .await
     }
 }

@@ -1,8 +1,10 @@
 use serenity::async_trait;
 use serenity::model::prelude::*;
 use serenity::prelude::*;
+use std::collections::HashMap;
 use std::env;
 
+mod backfill;
 mod link_rewriter;
 mod logger;
 mod tables;
@@ -66,6 +68,18 @@ async fn main() {
         .await
         .expect("failed to initialize database");
 
+    // Snapshot the per-channel catch-up floors (last_message_id high-water) BEFORE the gateway
+    // connects. This ordering is load-bearing: once client.start() runs, incoming message/reaction
+    // events bump last_message_id past the downtime gap within milliseconds, so reading the floor
+    // after connect would silently skip the gap forever. runs after init_tables so `channels` exists.
+    let catch_up_floors: HashMap<i64, i64> = postgres_client
+        .query("SELECT id, last_message_id FROM channels", &[])
+        .await
+        .expect("failed to snapshot catch-up floors")
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+
     // connect to discord
     let token = env::var("DISCORD_TOKEN").expect("no environment variable DISCORD_TOKEN provided");
     let intents = GatewayIntents::GUILD_MESSAGES
@@ -73,7 +87,7 @@ async fn main() {
         | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     let handlers = Handlers {
-        logger: DiscordLogger::new(postgres_client).await,
+        logger: DiscordLogger::new(postgres_client, catch_up_floors).await,
         link_rewriter: DiscordLinkRewriter::new(),
     };
 

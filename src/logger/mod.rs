@@ -1,6 +1,10 @@
-mod queries;
+pub(crate) mod queries;
 
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::futures::future::join_all;
@@ -12,13 +16,24 @@ use serenity::model::guild::Guild;
 use crate::logger::queries::Database;
 
 pub struct DiscordLogger {
-    database: Database,
+    database: Arc<Database>,
+    // channel_id -> last_message_id at boot, snapshotted in main.rs before the gateway connected
+    // (load-bearing: live events bump last_message_id within ms of connect, so the catch-up floor
+    // must be read while still disconnected)
+    catch_up_floors: HashMap<i64, i64>,
+    // run-once guard: ready re-fires on every reconnect, the swap keeps the backfill spawn idempotent
+    started: AtomicBool,
 }
 
 impl DiscordLogger {
-    pub async fn new(postgres_client: tokio_postgres::Client) -> Self {
+    pub async fn new(
+        postgres_client: tokio_postgres::Client,
+        catch_up_floors: HashMap<i64, i64>,
+    ) -> Self {
         DiscordLogger {
-            database: Database::new(postgres_client).await,
+            database: Arc::new(Database::new(postgres_client).await),
+            catch_up_floors,
+            started: AtomicBool::new(false),
         }
     }
 
@@ -28,20 +43,7 @@ impl DiscordLogger {
         message: &Message,
     ) -> Result<(), tokio_postgres::Error> {
         let id = message.id.get() as i64;
-        let timestamp = DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0)
-            .expect("invalid message timestamp")
-            .naive_utc();
-        let edit_timestamp = message.edited_timestamp.map_or(timestamp, |ts| {
-            DateTime::from_timestamp(ts.unix_timestamp(), 0)
-                .expect("invalid message edit timestamp")
-                .naive_utc()
-        });
         let channel_id = message.channel_id.get() as i64;
-        let user_id = message.author.id.get() as i64;
-        let username = &message.author.name;
-
-        // if we haven't logged this user before
-        self.database.insert_user(user_id, username).await?;
 
         // channel fetch is non-fatal: on failure we still record a degraded channel row so the
         // message FK holds. insert_channel COALESCE-upserts, so a later fetch enriches the row.
@@ -81,31 +83,8 @@ impl DiscordLogger {
             }
         }
 
-        // finally, don't forget to log the message
-        self.database
-            .insert_message(
-                id,
-                &message.content,
-                timestamp,
-                edit_timestamp,
-                user_id,
-                channel_id,
-            )
-            .await?;
-
-        // record any attachments (we keep the recoverable CDN url, not the file itself)
-        for attachment in &message.attachments {
-            self.database
-                .insert_attachment(
-                    attachment.id.get() as i64,
-                    &attachment.filename,
-                    &attachment.url,
-                    id,
-                )
-                .await?;
-        }
-
-        Ok(())
+        // user + message + attachments (no channel resolution); shared with the backfill path
+        persist_message(&self.database, message).await
     }
 
     async fn log_reaction(
@@ -179,6 +158,94 @@ impl DiscordLogger {
     }
 }
 
+// Persist user + message + attachments. No channel resolution and no Context, so it issues zero
+// extra REST calls — the single most important rate-limit decision for backfill, which only runs
+// over channels already in `channels` (the message FK is already satisfied). Shared with the live
+// path via log_message.
+//
+// Timestamp conversion soft-fails (skip + log, no panic) rather than .expect()-ing: a single bad
+// historical message can't kill the rest of a sweep, and a bad live timestamp no longer crashes the
+// process (strictly-better live behavior).
+pub(crate) async fn persist_message(
+    db: &Database,
+    message: &Message,
+) -> Result<(), tokio_postgres::Error> {
+    let id = message.id.get() as i64;
+    let Some(timestamp) = DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0) else {
+        eprintln!("skipping message {id}: out-of-range timestamp");
+        return Ok(());
+    };
+    let timestamp = timestamp.naive_utc();
+    // edit_time defaults to sent_time when absent; a bad edit timestamp falls back to sent_time
+    // rather than dropping an otherwise-valid message.
+    let edit_timestamp = match message.edited_timestamp {
+        Some(ts) => {
+            DateTime::from_timestamp(ts.unix_timestamp(), 0).map_or(timestamp, |dt| dt.naive_utc())
+        }
+        None => timestamp,
+    };
+    let channel_id = message.channel_id.get() as i64;
+    let user_id = message.author.id.get() as i64;
+    let username = &message.author.name;
+
+    db.insert_user(user_id, username).await?;
+    db.insert_message(
+        id,
+        &message.content,
+        timestamp,
+        edit_timestamp,
+        user_id,
+        channel_id,
+    )
+    .await?;
+
+    // record any attachments (we keep the recoverable CDN url, not the file itself)
+    for attachment in &message.attachments {
+        db.insert_attachment(
+            attachment.id.get() as i64,
+            &attachment.filename,
+            &attachment.url,
+            id,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+// Record the userless aggregate reaction counts that ride along in a GetMessages payload
+// (Message.reactions carries emoji + count, but not who reacted) into reaction_counts. Costs zero
+// extra REST calls. The live path never calls this — a freshly-received live message has no
+// reactions and per-user events keep current_reactions accurate; only a sweep observes the
+// anonymous remainder in pre-bot history. Customs get an emojis row first to satisfy the FK.
+pub(crate) async fn persist_reaction_counts(
+    db: &Database,
+    message: &Message,
+    observed_at: NaiveDateTime,
+) -> Result<(), tokio_postgres::Error> {
+    let message_id = message.id.get() as i64;
+    for reaction in &message.reactions {
+        let count = reaction.count as i32;
+        match &reaction.reaction_type {
+            ReactionType::Custom { id, name, .. } => {
+                let eid = id.get() as i64;
+                let ename = name.clone().unwrap_or_else(|| id.to_string());
+                db.insert_emoji(eid, &ename).await?;
+                db.upsert_reaction_count_custom(message_id, eid, &ename, count, observed_at)
+                    .await?;
+            }
+            ReactionType::Unicode(unicode) => {
+                db.upsert_reaction_count_unicode(message_id, unicode, count, observed_at)
+                    .await?;
+            }
+            other => {
+                eprintln!("unhandled reaction type {other:?}, skipping count");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl EventHandler for DiscordLogger {
     // when joining a new guild, store its information
@@ -248,5 +315,21 @@ impl EventHandler for DiscordLogger {
         .await;
 
         println!("client is now ready and listening");
+
+        // spawn backfill once per process (ready re-fires on reconnect; the swap is idempotent).
+        // No opt-in flag — both passes are normal operating behavior; only BACKFILL_DISABLE=1
+        // suppresses them. Spawning keeps the gateway + live logging responsive while it runs.
+        let disabled = std::env::var("BACKFILL_DISABLE").as_deref() == Ok("1");
+        if disabled {
+            println!("backfill: disabled via BACKFILL_DISABLE");
+        } else if !self.started.swap(true, Ordering::SeqCst) {
+            let http = ctx.http.clone(); // Arc<Http>
+            let db = self.database.clone(); // Arc<Database>
+            let floors = self.catch_up_floors.clone(); // snapshot from boot
+            let cfg = crate::backfill::Config::from_env();
+            tokio::spawn(async move {
+                crate::backfill::run(http, db, cfg, floors).await;
+            });
+        }
     }
 }
