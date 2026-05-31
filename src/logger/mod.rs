@@ -84,7 +84,7 @@ impl DiscordLogger {
         }
 
         // user + message + attachments (no channel resolution); shared with the backfill path
-        persist_message(&self.database, message).await
+        persist_message(&self.database, message).await.map(|_| ())
     }
 
     async fn log_reaction(
@@ -165,15 +165,16 @@ impl DiscordLogger {
 //
 // Timestamp conversion soft-fails (skip + log, no panic) rather than .expect()-ing: a single bad
 // historical message can't kill the rest of a sweep, and a bad live timestamp no longer crashes the
-// process (strictly-better live behavior).
+// process (strictly-better live behavior). Returns Ok(false) when the message was skipped (no row
+// inserted) so callers don't write child rows (reaction_counts) that would FK-violate.
 pub(crate) async fn persist_message(
     db: &Database,
     message: &Message,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<bool, tokio_postgres::Error> {
     let id = message.id.get() as i64;
     let Some(timestamp) = DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0) else {
         eprintln!("skipping message {id}: out-of-range timestamp");
-        return Ok(());
+        return Ok(false);
     };
     let timestamp = timestamp.naive_utc();
     // edit_time defaults to sent_time when absent; a bad edit timestamp falls back to sent_time
@@ -210,7 +211,7 @@ pub(crate) async fn persist_message(
         .await?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 // Record the userless aggregate reaction counts that ride along in a GetMessages payload

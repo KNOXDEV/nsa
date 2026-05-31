@@ -104,8 +104,11 @@ async fn fetch_page(
 async fn persist_page(db: &Database, messages: &[Message]) -> Result<(), tokio_postgres::Error> {
     let observed_at = Utc::now().naive_utc();
     for message in messages {
-        persist_message(db, message).await?;
-        persist_reaction_counts(db, message, observed_at).await?;
+        // skip reaction counts for a skipped message: its messages row was never inserted, so the
+        // reaction_counts FK would violate and abort (and stall) the whole sweep.
+        if persist_message(db, message).await? {
+            persist_reaction_counts(db, message, observed_at).await?;
+        }
     }
     Ok(())
 }

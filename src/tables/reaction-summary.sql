@@ -13,9 +13,13 @@ SELECT
     c.observed_count,
     GREATEST(COALESCE(c.observed_count, 0) - COALESCE(r.known_users, 0), 0) AS anonymous_count
 FROM (
-    SELECT message_id, emoji_id, emoji_name, COUNT(*) AS known_users
+    -- A custom emoji's identity is emoji_id; its name can change server-side, so grouping on name
+    -- too would split one custom reaction into multiple rows (double-counting observed_count and
+    -- splitting known_users across the FULL OUTER JOIN). Group customs by emoji_id alone (name
+    -- collapsed to NULL in the key, a representative picked via MAX); unicode keeps name as identity.
+    SELECT message_id, emoji_id, MAX(emoji_name) AS emoji_name, COUNT(*) AS known_users
     FROM current_reactions
-    GROUP BY message_id, emoji_id, emoji_name
+    GROUP BY message_id, emoji_id, CASE WHEN emoji_id IS NULL THEN emoji_name END
 ) r
 FULL OUTER JOIN (
     SELECT message_id, emoji_id, emoji_name, count AS observed_count
