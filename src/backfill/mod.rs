@@ -1,43 +1,37 @@
-// Historical message backfill. Two passes, both running on every boot (unless BACKFILL_DISABLE=1),
-// both persisting through the same path as live capture (logger::persist_message), both paging with
-// the exclusive `before` cursor at one REST call per page:
-//
-//   * catch-up  (§3b) restores the gap created by the downtime that just ended: page each channel
-//                from its current head down to the pre-gateway high-water snapshot (the floor).
-//   * sweep     (§3a) the one-time deep download: page each channel newest -> oldest down to channel
-//                start, checkpointed in backfill_state and never re-run once `complete`.
-//
-// Pure orchestration: holds no prepared statements (those stay centralized in Database). Every
-// failure soft-fails (log + abort that channel for this boot, no checkpoint advance) so a transient
-// REST/DB error costs at most one re-paged page, never a dropped message.
+// Historical message backfill, run on every boot (unless BACKFILL_DISABLE=1). Two passes, both
+// persisting through the live capture path (persist_message) and paging with the exclusive `before`
+// cursor, one REST GET per page:
+//   * catch-up — restores the just-ended downtime gap: page each channel from its head down to the
+//                pre-gateway high-water snapshot (the floor).
+//   * sweep    — the one-time deep download: page newest -> oldest to channel start, checkpointed in
+//                backfill_state and never re-run once `complete`.
+// Every failure soft-fails (log + abort that channel for this boot, no checkpoint advance), so a
+// transient error re-pages at most one page rather than dropping a message.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use serenity::builder::GetMessages;
 use serenity::http::Http;
-use serenity::model::channel::Message;
+use serenity::model::channel::{Message, ReactionType};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::time::sleep;
 
+use crate::logger::persist_message;
 use crate::logger::queries::Database;
-use crate::logger::{persist_message, persist_reaction_counts};
 
 const DEFAULT_PAGE_DELAY_MS: u64 = 750;
-// Discord caps GetMessages at 100; one page == one REST GET.
-const PAGE_LIMIT: u8 = 100;
-// emit a sweep progress line every this many pages so a huge channel isn't silent for hours
-const HEARTBEAT_PAGES: u64 = 25;
+const PAGE_LIMIT: u8 = 100; // Discord's GetMessages cap
+const HEARTBEAT_PAGES: u64 = 25; // sweep progress cadence, so a huge channel isn't silent for hours
 
 pub struct Config {
     pub page_delay: Duration,
 }
 
 impl Config {
-    // Never panics: an unparseable BACKFILL_PAGE_DELAY_MS is logged and falls back to the default,
-    // so a typo in a deploy env can't silently disable backfill.
+    // A bad BACKFILL_PAGE_DELAY_MS falls back to the default rather than panicking.
     pub fn from_env() -> Self {
         let page_delay_ms = match std::env::var("BACKFILL_PAGE_DELAY_MS") {
             Ok(raw) => raw.parse().unwrap_or_else(|_| {
@@ -99,15 +93,45 @@ async fn fetch_page(
     channel_id.messages(http, builder).await
 }
 
-// Persist an entire page (message + reaction counts) before any checkpoint advances. A single
-// observed_at for the page matches log_reaction's clock semantics.
+// Persist a whole page before any checkpoint advances. One observed_at per page matches log_reaction.
 async fn persist_page(db: &Database, messages: &[Message]) -> Result<(), tokio_postgres::Error> {
     let observed_at = Utc::now().naive_utc();
     for message in messages {
-        // skip reaction counts for a skipped message: its messages row was never inserted, so the
-        // reaction_counts FK would violate and abort (and stall) the whole sweep.
+        // a skipped message has no messages row, so its reaction_counts would FK-violate and stall
+        // the sweep; only record counts once the message itself persisted.
         if persist_message(db, message).await? {
             persist_reaction_counts(db, message, observed_at).await?;
+        }
+    }
+    Ok(())
+}
+
+// Record the userless aggregate reaction counts carried in a GetMessages payload (Message.reactions
+// has emoji + count, but not who reacted). Sweep-only: live messages arrive with no reactions and
+// per-user events keep current_reactions accurate. Customs get an emojis row first to satisfy the FK.
+async fn persist_reaction_counts(
+    db: &Database,
+    message: &Message,
+    observed_at: NaiveDateTime,
+) -> Result<(), tokio_postgres::Error> {
+    let message_id = message.id.get() as i64;
+    for reaction in &message.reactions {
+        let count = reaction.count as i32;
+        match &reaction.reaction_type {
+            ReactionType::Custom { id, name, .. } => {
+                let eid = id.get() as i64;
+                let ename = name.clone().unwrap_or_else(|| id.to_string());
+                db.insert_emoji(eid, &ename).await?;
+                db.upsert_reaction_count_custom(message_id, eid, &ename, count, observed_at)
+                    .await?;
+            }
+            ReactionType::Unicode(unicode) => {
+                db.upsert_reaction_count_unicode(message_id, unicode, count, observed_at)
+                    .await?;
+            }
+            other => {
+                eprintln!("unhandled reaction type {other:?}, skipping count");
+            }
         }
     }
     Ok(())
@@ -121,7 +145,7 @@ fn max_id(messages: &[Message]) -> i64 {
     messages.iter().map(|m| m.id.get() as i64).max().unwrap()
 }
 
-// §3a — the one-time deep download. Pages newest -> oldest to channel start, checkpointing
+// The one-time deep download. Pages newest -> oldest to channel start, checkpointing
 // oldest_backfilled_id each page; once it reaches the start it marks `complete` and never re-runs.
 async fn sweep_channel(http: &Http, db: &Database, channel_id: i64, cfg: &Config) {
     let cid = ChannelId::new(channel_id as u64);
@@ -196,9 +220,9 @@ async fn sweep_channel(http: &Http, db: &Database, channel_id: i64, cfg: &Config
     }
 }
 
-// §3b — restores the downtime gap. Pages from the live head down to `floor` (the channels
-// .last_message_id snapshot taken in main.rs before the gateway connected), so it fetches exactly
-// (floor, head]. Interruption-safe: the floor only advances (step 4) after the gap is fully paged.
+// Restores the downtime gap. Pages from the live head down to `floor` (the channels.last_message_id
+// snapshot taken in main.rs before the gateway connected), fetching exactly (floor, head].
+// Interruption-safe: the floor only advances after the gap is fully paged.
 async fn catch_up_channel(
     http: &Http,
     db: &Database,
@@ -212,8 +236,8 @@ async fn catch_up_channel(
     };
     let cid = ChannelId::new(channel_id as u64);
 
-    let mut cursor: Option<i64> = None; // first page has no `before` -> the current head
-    let mut head: Option<i64> = None; // set only from the first non-empty page (the live head)
+    let mut cursor: Option<i64> = None; // None -> first page starts at the live head
+    let mut head: Option<i64> = None; // the live head, captured from the first non-empty page
     let mut pages: u64 = 0;
     let mut total: u64 = 0;
 
@@ -242,10 +266,11 @@ async fn catch_up_channel(
         pages += 1;
 
         // reached known-contiguous territory: everything older than this is already captured
-        if min_id(&batch) <= floor {
+        let oldest = min_id(&batch);
+        if oldest <= floor {
             break;
         }
-        cursor = Some(min_id(&batch));
+        cursor = Some(oldest);
         sleep(cfg.page_delay).await;
     }
 

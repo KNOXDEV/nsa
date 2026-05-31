@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::futures::future::join_all;
@@ -158,15 +158,10 @@ impl DiscordLogger {
     }
 }
 
-// Persist user + message + attachments. No channel resolution and no Context, so it issues zero
-// extra REST calls — the single most important rate-limit decision for backfill, which only runs
-// over channels already in `channels` (the message FK is already satisfied). Shared with the live
-// path via log_message.
-//
-// Timestamp conversion soft-fails (skip + log, no panic) rather than .expect()-ing: a single bad
-// historical message can't kill the rest of a sweep, and a bad live timestamp no longer crashes the
-// process (strictly-better live behavior). Returns Ok(false) when the message was skipped (no row
-// inserted) so callers don't write child rows (reaction_counts) that would FK-violate.
+// Persist user + message + attachments. Shared by the live and backfill paths; issues zero extra
+// REST calls (no channel resolution), so backfill stays within rate limits. Bad timestamps soft-fail
+// (skip + log, no panic). Returns Ok(false) when the message was skipped, so callers don't write
+// child rows (reaction_counts) that would FK-violate against the missing messages row.
 pub(crate) async fn persist_message(
     db: &Database,
     message: &Message,
@@ -212,39 +207,6 @@ pub(crate) async fn persist_message(
     }
 
     Ok(true)
-}
-
-// Record the userless aggregate reaction counts that ride along in a GetMessages payload
-// (Message.reactions carries emoji + count, but not who reacted) into reaction_counts. Costs zero
-// extra REST calls. The live path never calls this — a freshly-received live message has no
-// reactions and per-user events keep current_reactions accurate; only a sweep observes the
-// anonymous remainder in pre-bot history. Customs get an emojis row first to satisfy the FK.
-pub(crate) async fn persist_reaction_counts(
-    db: &Database,
-    message: &Message,
-    observed_at: NaiveDateTime,
-) -> Result<(), tokio_postgres::Error> {
-    let message_id = message.id.get() as i64;
-    for reaction in &message.reactions {
-        let count = reaction.count as i32;
-        match &reaction.reaction_type {
-            ReactionType::Custom { id, name, .. } => {
-                let eid = id.get() as i64;
-                let ename = name.clone().unwrap_or_else(|| id.to_string());
-                db.insert_emoji(eid, &ename).await?;
-                db.upsert_reaction_count_custom(message_id, eid, &ename, count, observed_at)
-                    .await?;
-            }
-            ReactionType::Unicode(unicode) => {
-                db.upsert_reaction_count_unicode(message_id, unicode, count, observed_at)
-                    .await?;
-            }
-            other => {
-                eprintln!("unhandled reaction type {other:?}, skipping count");
-            }
-        }
-    }
-    Ok(())
 }
 
 #[async_trait]
@@ -324,9 +286,9 @@ impl EventHandler for DiscordLogger {
         if disabled {
             println!("backfill: disabled via BACKFILL_DISABLE");
         } else if !self.started.swap(true, Ordering::SeqCst) {
-            let http = ctx.http.clone(); // Arc<Http>
-            let db = self.database.clone(); // Arc<Database>
-            let floors = self.catch_up_floors.clone(); // snapshot from boot
+            let http = ctx.http.clone();
+            let db = self.database.clone();
+            let floors = self.catch_up_floors.clone();
             let cfg = crate::backfill::Config::from_env();
             tokio::spawn(async move {
                 crate::backfill::run(http, db, cfg, floors).await;
