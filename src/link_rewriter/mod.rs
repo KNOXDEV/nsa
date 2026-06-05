@@ -1,10 +1,15 @@
+use std::time::Duration;
+
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
 use serenity::async_trait;
+use serenity::builder::EditMessage;
 use serenity::client::{Context, EventHandler};
+use serenity::collector::collect;
+use serenity::futures::{Stream, StreamExt};
 use serenity::model::channel::Message;
+use serenity::model::event::Event;
 use serenity::model::gateway::Ready;
-use serenity::prelude::Mentionable;
 
 lazy_static! {
     static ref URL_REGEX: Regex = Regex::new(
@@ -67,8 +72,44 @@ fn rewrite_captured_link(caps: Captures) -> Option<String> {
     }
 }
 
-fn should_delete_og_message(links: &[String], original_message: &str) -> bool {
-    links.len() == 1 && !original_message.trim().contains(" ")
+/// Suppress the link-preview embeds on the original message so we don't end up
+/// with a duplicate, embed-unfriendly preview sitting next to our rewrite.
+///
+/// Discord generates link embeds asynchronously *after* a message is created and
+/// can add more later (slow links, multiple links, server load). `updates` is a
+/// stream of embed-bearing `MessageUpdate`s for this message, registered by the
+/// caller *before* the reply so we don't miss the first one. We suppress on each
+/// update — re-applying the flag is idempotent — and give up once 10s pass with
+/// no further update.
+///
+/// Suppressing another user's message requires the `MANAGE_MESSAGES` permission.
+async fn suppress_original_embeds<S>(ctx: &Context, message: &mut Message, updates: S)
+where
+    S: Stream<Item = ()>,
+{
+    tokio::pin!(updates);
+
+    // a cached embed for a previously-seen link ships in the create payload with
+    // no MessageUpdate to follow, so suppress it up front
+    if !message.embeds.is_empty() {
+        suppress_embeds_now(ctx, message).await;
+    }
+
+    // otherwise embeds arrive asynchronously: suppress on each update, giving up
+    // once 10s pass with no further update
+    while let Ok(Some(())) = tokio::time::timeout(Duration::from_secs(10), updates.next()).await {
+        suppress_embeds_now(ctx, message).await;
+    }
+}
+
+/// Apply the `SUPPRESS_EMBEDS` flag to a message, logging on failure.
+async fn suppress_embeds_now(ctx: &Context, message: &mut Message) {
+    if let Err(why) = message
+        .edit(&ctx.http, EditMessage::new().suppress_embeds(true))
+        .await
+    {
+        eprintln!("failed to suppress embeds on original message: {why}");
+    }
 }
 
 pub(crate) struct DiscordLinkRewriter;
@@ -81,7 +122,7 @@ impl DiscordLinkRewriter {
 
 #[async_trait]
 impl EventHandler for DiscordLinkRewriter {
-    async fn message(&self, ctx: Context, new_message: Message) {
+    async fn message(&self, ctx: Context, mut new_message: Message) {
         // never rewrite yourself (or other bots)
         if new_message.author.bot {
             return;
@@ -103,33 +144,37 @@ impl EventHandler for DiscordLinkRewriter {
             .iter()
             .for_each(|link| println!("sending rewritten link: {}", link));
 
-        let should_delete =
-            should_delete_og_message(&rewritten_links, new_message.content.as_str());
+        // nothing we care about; leave the message untouched
+        if rewritten_links.is_empty() {
+            return;
+        }
 
-        let reply_message = if should_delete {
-            format!(
-                "{} sent:\n {}",
-                new_message.author.mention(),
-                rewritten_links.join("\n")
-            )
-        } else {
-            rewritten_links.join("\n")
-        };
+        // register the embed-update collector BEFORE replying so we don't miss
+        // the MessageUpdate that carries Discord's async-generated link preview;
+        // only match updates that actually carry embeds
+        let msg_id = new_message.id;
+        let updates = collect(&ctx.shard, move |ev| match ev {
+            Event::MessageUpdate(update)
+                if update.id == msg_id
+                    && update
+                        .embeds
+                        .as_ref()
+                        .is_some_and(|embeds| !embeds.is_empty()) =>
+            {
+                Some(())
+            }
+            _ => None,
+        });
 
         // send reply with rewritten links
-        if !rewritten_links.is_empty() {
-            new_message
-                .reply(&ctx.http, reply_message)
-                .await
-                .expect("Failed to reply to message containing links");
-        }
+        new_message
+            .reply(&ctx.http, rewritten_links.join("\n"))
+            .await
+            .expect("Failed to reply to message containing links");
 
-        if should_delete {
-            new_message
-                .delete(&ctx.http)
-                .await
-                .expect("failed to delete OG message");
-        }
+        // always keep the original message; just strip its embed-unfriendly link
+        // preview to avoid a duplicate, ugly embed beside our rewrite
+        suppress_original_embeds(&ctx, &mut new_message, updates).await;
     }
 
     async fn ready(&self, _ctx: Context, _data_about_bot: Ready) {
@@ -139,7 +184,7 @@ impl EventHandler for DiscordLinkRewriter {
 
 #[cfg(test)]
 mod test {
-    use crate::link_rewriter::{rewrite_captured_link, should_delete_og_message, URL_REGEX};
+    use crate::link_rewriter::{rewrite_captured_link, URL_REGEX};
 
     #[test]
     fn rewrite_twitter() {
@@ -209,33 +254,5 @@ mod test {
             result_link,
             "https://yeet.knx.pw/https://www.nytimes.com/FAKEURL"
         )
-    }
-
-    #[test]
-    fn correctly_determine_og_message_should_be_deleted() {
-        let test_link = "https://www.nytimes.com/FAKEURL";
-
-        let rewritten_links: Vec<String> = URL_REGEX
-            .captures_iter(test_link)
-            .filter_map(rewrite_captured_link)
-            .collect();
-
-        let should_delete = should_delete_og_message(&rewritten_links, test_link);
-
-        assert_eq!(should_delete, true)
-    }
-
-    #[test]
-    fn correctly_determine_og_message_should_not_be_deleted() {
-        let test_link = "Here is a cool link: https://www.pixiv.net/FAKEURL";
-
-        let rewritten_links: Vec<String> = URL_REGEX
-            .captures_iter(test_link)
-            .filter_map(rewrite_captured_link)
-            .collect();
-
-        let should_delete = should_delete_og_message(&rewritten_links, test_link);
-
-        assert_eq!(should_delete, false)
     }
 }
