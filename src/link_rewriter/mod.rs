@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::time::Duration;
 
 use lazy_static::lazy_static;
@@ -72,6 +73,48 @@ fn rewrite_captured_link(caps: Captures) -> Option<String> {
     }
 }
 
+/// Byte ranges in `content` wrapped in Discord spoiler tags (`||...||`).
+/// Delimiters are paired greedily left-to-right; an unmatched trailing `||` is
+/// not a spoiler and is ignored.
+fn spoiler_ranges(content: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while let Some(open) = content[cursor..].find("||") {
+        let open = cursor + open;
+        let after_open = open + 2;
+        let Some(close) = content[after_open..].find("||") else {
+            break;
+        };
+        let close = after_open + close;
+        ranges.push(open..close + 2);
+        cursor = close + 2;
+    }
+    ranges
+}
+
+/// Extract and rewrite every supported link in `content`. A link sitting inside
+/// a Discord spoiler (`||...||`) yields a spoilered rewrite so we don't reveal
+/// something the author deliberately hid.
+fn rewrite_links(content: &str) -> Vec<String> {
+    let spoilers = spoiler_ranges(content);
+    URL_REGEX
+        .captures_iter(content)
+        .filter_map(|caps| {
+            let span = caps.get(0).unwrap().range();
+            let spoilered = spoilers
+                .iter()
+                .any(|r| r.start <= span.start && span.end <= r.end);
+            rewrite_captured_link(caps).map(|link| {
+                if spoilered {
+                    format!("||{link}||")
+                } else {
+                    link
+                }
+            })
+        })
+        .collect()
+}
+
 /// Suppress the link-preview embeds on the original message so we don't end up
 /// with a duplicate, embed-unfriendly preview sitting next to our rewrite.
 ///
@@ -133,12 +176,9 @@ impl EventHandler for DiscordLinkRewriter {
             new_message.author, new_message.content
         );
 
-        // parse the message for links
-        // and check for links we care about
-        let rewritten_links: Vec<String> = URL_REGEX
-            .captures_iter(new_message.content.as_str())
-            .filter_map(rewrite_captured_link)
-            .collect();
+        // parse the message for links and rewrite the ones we care about,
+        // preserving any spoiler wrapping on the original link
+        let rewritten_links = rewrite_links(new_message.content.as_str());
 
         rewritten_links
             .iter()
@@ -172,8 +212,15 @@ impl EventHandler for DiscordLinkRewriter {
             .await
             .expect("Failed to reply to message containing links");
 
-        // always keep the original message; just strip its embed-unfriendly link
-        // preview to avoid a duplicate, ugly embed beside our rewrite
+        // keep the original message; just strip its embed-unfriendly link preview
+        // to avoid a duplicate, ugly embed beside our rewrite.
+        //
+        // NOTE: embed suppression is message-wide (Discord's SUPPRESS_EMBEDS flag
+        // is all-or-nothing — there's no per-embed removal, and on another user's
+        // message the flag is the only field we can edit). So in the rare case of
+        // a message mixing a rewritten link with a foreign embeddable one (e.g. a
+        // twitter link *and* a youtube link), we also strip the foreign embed. We
+        // accept that edge case to keep this simple.
         suppress_original_embeds(&ctx, &mut new_message, updates).await;
     }
 
@@ -184,7 +231,7 @@ impl EventHandler for DiscordLinkRewriter {
 
 #[cfg(test)]
 mod test {
-    use crate::link_rewriter::{rewrite_captured_link, URL_REGEX};
+    use crate::link_rewriter::{rewrite_captured_link, rewrite_links, URL_REGEX};
 
     #[test]
     fn rewrite_twitter() {
@@ -243,6 +290,40 @@ mod test {
 
         let result_link = rewrite_captured_link(URL_REGEX.captures(test_link).unwrap()).unwrap();
         assert_eq!(result_link, "https://www.phixiv.net/FAKEURL")
+    }
+
+    #[test]
+    fn spoilered_link_yields_spoilered_rewrite() {
+        let result = rewrite_links("||https://twitter.com/FAKEURL||");
+        assert_eq!(result, vec!["||https://fxtwitter.com/FAKEURL||"]);
+    }
+
+    #[test]
+    fn spoilered_link_with_surrounding_text() {
+        let result = rewrite_links("look at this ||https://x.com/FAKEURL|| crazy");
+        assert_eq!(result, vec!["||https://fxtwitter.com/FAKEURL||"]);
+    }
+
+    #[test]
+    fn unspoilered_link_is_not_wrapped() {
+        let result = rewrite_links("https://twitter.com/FAKEURL");
+        assert_eq!(result, vec!["https://fxtwitter.com/FAKEURL"]);
+    }
+
+    #[test]
+    fn mixed_spoilered_and_plain_links() {
+        let result = rewrite_links("||https://twitter.com/A|| and https://bsky.app/B");
+        assert_eq!(
+            result,
+            vec!["||https://fxtwitter.com/A||", "https://fxbsky.app/B"]
+        );
+    }
+
+    #[test]
+    fn unmatched_spoiler_delimiter_is_ignored() {
+        // a lone trailing `||` doesn't open a spoiler region
+        let result = rewrite_links("https://twitter.com/FAKEURL ||");
+        assert_eq!(result, vec!["https://fxtwitter.com/FAKEURL"]);
     }
 
     #[test]
