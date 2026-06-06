@@ -11,6 +11,7 @@ use serenity::futures::{Stream, StreamExt};
 use serenity::model::channel::Message;
 use serenity::model::event::Event;
 use serenity::model::gateway::Ready;
+use serenity::prelude::Mentionable;
 
 lazy_static! {
     static ref URL_REGEX: Regex = Regex::new(
@@ -92,27 +93,61 @@ fn spoiler_ranges(content: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+/// The result of scanning a message for links we rewrite.
+struct Rewrites {
+    /// The rewritten links, in order, each spoilered if its original was.
+    links: Vec<String>,
+    /// `true` when the message held no *words* outside the links we rewrote —
+    /// i.e. stripping those links leaves nothing but whitespace and markdown
+    /// formatting (`**`, `||`, `~~`, …). The original is then redundant and can
+    /// be deleted. A non-rewritten URL or any prose counts as words and keeps
+    /// this `false`.
+    only_rewritten_links: bool,
+}
+
 /// Extract and rewrite every supported link in `content`. A link sitting inside
 /// a Discord spoiler (`||...||`) yields a spoilered rewrite so we don't reveal
 /// something the author deliberately hid.
-fn rewrite_links(content: &str) -> Vec<String> {
+fn rewrite_links(content: &str) -> Rewrites {
     let spoilers = spoiler_ranges(content);
-    URL_REGEX
-        .captures_iter(content)
-        .filter_map(|caps| {
-            let span = caps.get(0).unwrap().range();
-            let spoilered = spoilers
-                .iter()
-                .any(|r| r.start <= span.start && span.end <= r.end);
-            rewrite_captured_link(caps).map(|link| {
-                if spoilered {
-                    format!("||{link}||")
-                } else {
-                    link
-                }
-            })
-        })
-        .collect()
+
+    let mut links = Vec::new();
+    let mut rewritten_spans: Vec<Range<usize>> = Vec::new();
+    for caps in URL_REGEX.captures_iter(content) {
+        let span = caps.get(0).unwrap().range();
+        let spoilered = spoilers
+            .iter()
+            .any(|r| r.start <= span.start && span.end <= r.end);
+        if let Some(link) = rewrite_captured_link(caps) {
+            links.push(if spoilered {
+                format!("||{link}||")
+            } else {
+                link
+            });
+            rewritten_spans.push(span);
+        }
+    }
+
+    // Build what's left after removing the rewritten links. `captures_iter`
+    // yields non-overlapping matches in order, so the spans are sorted.
+    let mut leftover = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for span in &rewritten_spans {
+        leftover.push_str(&content[cursor..span.start]);
+        cursor = span.end;
+    }
+    leftover.push_str(&content[cursor..]);
+
+    // Only *words* outside the links keep the original alive. Markdown
+    // formatting (`**`, `||`, `~~`, …) and whitespace carry no alphanumerics, so
+    // a wrapped-but-wordless link still counts as link-only; prose or a
+    // non-rewritten URL carries alphanumerics and does not.
+    let only_rewritten_links = !links.is_empty() && !leftover.chars().any(char::is_alphanumeric);
+
+    Rewrites {
+        links,
+        only_rewritten_links,
+    }
 }
 
 /// Suppress the link-preview embeds on the original message so we don't end up
@@ -178,7 +213,10 @@ impl EventHandler for DiscordLinkRewriter {
 
         // parse the message for links and rewrite the ones we care about,
         // preserving any spoiler wrapping on the original link
-        let rewritten_links = rewrite_links(new_message.content.as_str());
+        let Rewrites {
+            links: rewritten_links,
+            only_rewritten_links,
+        } = rewrite_links(new_message.content.as_str());
 
         rewritten_links
             .iter()
@@ -186,6 +224,29 @@ impl EventHandler for DiscordLinkRewriter {
 
         // nothing we care about; leave the message untouched
         if rewritten_links.is_empty() {
+            return;
+        }
+
+        // when the message was nothing but the links we rewrote, the original is
+        // redundant: replace it outright with our rewrite, mentioning the author
+        // so the lost attribution is preserved.
+        if only_rewritten_links {
+            new_message
+                .channel_id
+                .say(
+                    &ctx.http,
+                    format!(
+                        "{} sent:\n{}",
+                        new_message.author.mention(),
+                        rewritten_links.join("\n")
+                    ),
+                )
+                .await
+                .expect("Failed to send rewritten links");
+            new_message
+                .delete(&ctx.http)
+                .await
+                .expect("failed to delete original message");
             return;
         }
 
@@ -295,26 +356,26 @@ mod test {
     #[test]
     fn spoilered_link_yields_spoilered_rewrite() {
         let result = rewrite_links("||https://twitter.com/FAKEURL||");
-        assert_eq!(result, vec!["||https://fxtwitter.com/FAKEURL||"]);
+        assert_eq!(result.links, vec!["||https://fxtwitter.com/FAKEURL||"]);
     }
 
     #[test]
     fn spoilered_link_with_surrounding_text() {
         let result = rewrite_links("look at this ||https://x.com/FAKEURL|| crazy");
-        assert_eq!(result, vec!["||https://fxtwitter.com/FAKEURL||"]);
+        assert_eq!(result.links, vec!["||https://fxtwitter.com/FAKEURL||"]);
     }
 
     #[test]
     fn unspoilered_link_is_not_wrapped() {
         let result = rewrite_links("https://twitter.com/FAKEURL");
-        assert_eq!(result, vec!["https://fxtwitter.com/FAKEURL"]);
+        assert_eq!(result.links, vec!["https://fxtwitter.com/FAKEURL"]);
     }
 
     #[test]
     fn mixed_spoilered_and_plain_links() {
         let result = rewrite_links("||https://twitter.com/A|| and https://bsky.app/B");
         assert_eq!(
-            result,
+            result.links,
             vec!["||https://fxtwitter.com/A||", "https://fxbsky.app/B"]
         );
     }
@@ -323,7 +384,57 @@ mod test {
     fn unmatched_spoiler_delimiter_is_ignored() {
         // a lone trailing `||` doesn't open a spoiler region
         let result = rewrite_links("https://twitter.com/FAKEURL ||");
-        assert_eq!(result, vec!["https://fxtwitter.com/FAKEURL"]);
+        assert_eq!(result.links, vec!["https://fxtwitter.com/FAKEURL"]);
+    }
+
+    #[test]
+    fn bare_link_is_only_rewritten_links() {
+        assert!(rewrite_links("https://twitter.com/FAKEURL").only_rewritten_links);
+    }
+
+    #[test]
+    fn bare_link_with_surrounding_whitespace_is_only_rewritten_links() {
+        assert!(rewrite_links("  https://twitter.com/FAKEURL\n").only_rewritten_links);
+    }
+
+    #[test]
+    fn multiple_bare_links_are_only_rewritten_links() {
+        assert!(rewrite_links("https://twitter.com/A https://bsky.app/B").only_rewritten_links);
+    }
+
+    #[test]
+    fn spoilered_bare_link_is_only_rewritten_links() {
+        // spoiler delimiters are formatting, not words
+        assert!(rewrite_links("||https://twitter.com/FAKEURL||").only_rewritten_links);
+    }
+
+    #[test]
+    fn formatted_bare_link_is_only_rewritten_links() {
+        // bold markers are formatting, not words
+        assert!(rewrite_links("**https://twitter.com/FAKEURL**").only_rewritten_links);
+    }
+
+    #[test]
+    fn link_with_extra_text_is_not_only_rewritten_links() {
+        assert!(!rewrite_links("look at this https://twitter.com/FAKEURL").only_rewritten_links);
+    }
+
+    #[test]
+    fn link_with_text_inside_spoiler_is_not_only_rewritten_links() {
+        assert!(!rewrite_links("||secret https://twitter.com/FAKEURL||").only_rewritten_links);
+    }
+
+    #[test]
+    fn rewritten_link_alongside_foreign_link_is_not_only_rewritten_links() {
+        // the unrewritten link is additional content we must not delete
+        let result = rewrite_links("https://twitter.com/A https://youtube.com/B");
+        assert_eq!(result.links, vec!["https://fxtwitter.com/A"]);
+        assert!(!result.only_rewritten_links);
+    }
+
+    #[test]
+    fn no_rewritten_links_is_not_only_rewritten_links() {
+        assert!(!rewrite_links("just some text, no links").only_rewritten_links);
     }
 
     #[test]
