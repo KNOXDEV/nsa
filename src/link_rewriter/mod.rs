@@ -231,13 +231,16 @@ impl EventHandler for DiscordLinkRewriter {
         // redundant: replace it outright with our rewrite, mentioning the author
         // so the lost attribution is preserved.
         if only_rewritten_links {
+            // a single link reads better inline; multiple get their own lines
+            let separator = if rewritten_links.len() == 1 { " " } else { "\n" };
             new_message
                 .channel_id
                 .say(
                     &ctx.http,
                     format!(
-                        "{} sent:\n{}",
+                        "{} sent:{}{}",
                         new_message.author.mention(),
+                        separator,
                         rewritten_links.join("\n")
                     ),
                 )
