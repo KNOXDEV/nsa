@@ -18,6 +18,7 @@ pkgs.mkShell {
     export PG_USER=nsa
     export PG_PASSWORD=nsa # ignored under trust auth, but the bot requires it set
     export PGDATABASE=nsa
+    export ATTACHMENTS_DIR="$PWD/.attachments" # dev-local attachment file store, gitignored
 
     echo "nsa devshell — run 'process-compose' to start postgres, then 'cargo run'"
   '';

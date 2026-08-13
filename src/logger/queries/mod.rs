@@ -25,6 +25,13 @@ const UPSERT_REACTION_COUNT_CUSTOM_QUERY: &str =
     include_str!("../../backfill/queries/upsert-reaction-count-custom.sql");
 const UPSERT_REACTION_COUNT_UNICODE_QUERY: &str =
     include_str!("../../backfill/queries/upsert-reaction-count-unicode.sql");
+// attachment-store SQL lives next to src/attachments (like backfill's), statements stay here
+const PENDING_ATTACHMENT_MESSAGES_QUERY: &str =
+    include_str!("../../attachments/queries/pending-attachment-messages.sql");
+const PENDING_ATTACHMENTS_FOR_MESSAGE_QUERY: &str =
+    include_str!("../../attachments/queries/pending-attachments-for-message.sql");
+const UPSERT_ATTACHMENT_FILE_QUERY: &str =
+    include_str!("../../attachments/queries/upsert-attachment-file.sql");
 
 pub struct Database {
     postgres_client: Client,
@@ -44,6 +51,9 @@ pub struct Database {
     bump_last_message_id_statement: Statement,
     upsert_reaction_count_custom_statement: Statement,
     upsert_reaction_count_unicode_statement: Statement,
+    pending_attachment_messages_statement: Statement,
+    pending_attachments_for_message_statement: Statement,
+    upsert_attachment_file_statement: Statement,
 }
 
 impl Database {
@@ -65,6 +75,9 @@ impl Database {
             bump_last_message_id_statement,
             upsert_reaction_count_custom_statement,
             upsert_reaction_count_unicode_statement,
+            pending_attachment_messages_statement,
+            pending_attachments_for_message_statement,
+            upsert_attachment_file_statement,
         ) = tokio::try_join!(
             postgres_client.prepare(INSERT_MESSAGE_QUERY),
             postgres_client.prepare(INSERT_USER_QUERY),
@@ -82,6 +95,9 @@ impl Database {
             postgres_client.prepare(BUMP_LAST_MESSAGE_ID_QUERY),
             postgres_client.prepare(UPSERT_REACTION_COUNT_CUSTOM_QUERY),
             postgres_client.prepare(UPSERT_REACTION_COUNT_UNICODE_QUERY),
+            postgres_client.prepare(PENDING_ATTACHMENT_MESSAGES_QUERY),
+            postgres_client.prepare(PENDING_ATTACHMENTS_FOR_MESSAGE_QUERY),
+            postgres_client.prepare(UPSERT_ATTACHMENT_FILE_QUERY),
         )
         .expect("failed to generate prepared statements");
 
@@ -103,6 +119,9 @@ impl Database {
             bump_last_message_id_statement,
             upsert_reaction_count_custom_statement,
             upsert_reaction_count_unicode_statement,
+            pending_attachment_messages_statement,
+            pending_attachments_for_message_statement,
+            upsert_attachment_file_statement,
         }
     }
 
@@ -307,6 +326,66 @@ impl Database {
             .execute(
                 &self.upsert_reaction_count_unicode_statement,
                 &[&message_id, &emoji_name, &count, &observed_at],
+            )
+            .await
+    }
+
+    // newest-first page of (message_id, channel_id) still owing downloads; before = keyset cursor
+    pub async fn pending_attachment_messages(
+        &self,
+        before: i64,
+        max_bytes: i64,
+    ) -> Result<Vec<(i64, i64)>, Error> {
+        Ok(self
+            .postgres_client
+            .query(
+                &self.pending_attachment_messages_statement,
+                &[&before, &max_bytes],
+            )
+            .await?
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
+    // attachment ids of one message still needing a download (skips stored/gone/oversized-over-cap)
+    pub async fn pending_attachments_for_message(
+        &self,
+        message_id: i64,
+        max_bytes: i64,
+    ) -> Result<Vec<i64>, Error> {
+        Ok(self
+            .postgres_client
+            .query(
+                &self.pending_attachments_for_message_statement,
+                &[&message_id, &max_bytes],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect())
+    }
+
+    pub async fn upsert_attachment_file(
+        &self,
+        attachment_id: i64,
+        status: &str,
+        path: Option<&str>,
+        size_bytes: Option<i64>,
+        content_type: Option<&str>,
+        stored_at: NaiveDateTime,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.upsert_attachment_file_statement,
+                &[
+                    &attachment_id,
+                    &status,
+                    &path,
+                    &size_bytes,
+                    &content_type,
+                    &stored_at,
+                ],
             )
             .await
     }

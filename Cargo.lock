@@ -995,6 +995,7 @@ dependencies = [
  "lazy_static",
  "rand 0.10.1",
  "regex",
+ "reqwest",
  "serenity",
  "tokio",
  "tokio-postgres",

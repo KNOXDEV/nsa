@@ -4,5 +4,6 @@
 .envrc
 .direnv
 .pgdata
+.attachments
 # local-only Claude config & operator notes, never committed
 .claude/

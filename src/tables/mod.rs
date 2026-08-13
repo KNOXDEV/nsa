@@ -10,6 +10,7 @@ const CURRENT_REACTIONS_VIEW: &str = include_str!("./current-reactions.sql");
 const REACTION_COUNTS_TABLE: &str = include_str!("./reaction_counts.sql");
 const REACTION_SUMMARY_VIEW: &str = include_str!("./reaction-summary.sql");
 const ATTACHMENTS_TABLE: &str = include_str!("./attachments.sql");
+const ATTACHMENT_FILES_TABLE: &str = include_str!("./attachment_files.sql");
 const MESSAGES_TABLE: &str = include_str!("./messages.sql");
 const PIN_EVENTS_TABLE: &str = include_str!("./pin_events.sql");
 const CURRENT_PINS_VIEW: &str = include_str!("./current-pins.sql");
@@ -34,7 +35,10 @@ pub async fn init_tables(client: &Client) -> Result<(), Error> {
     client.batch_execute(REACTION_COUNTS_TABLE).await?;
     // reconciliation view; must run after current_reactions + reaction_counts exist
     client.query_opt(REACTION_SUMMARY_VIEW, &[]).await?;
-    client.query_opt(ATTACHMENTS_TABLE, &[]).await?;
+    // table + its message_id index; batch_execute because the file holds two commands
+    client.batch_execute(ATTACHMENTS_TABLE).await?;
+    // local-file bookkeeping for downloaded attachments; FK on attachments, so it must follow
+    client.query_opt(ATTACHMENT_FILES_TABLE, &[]).await?;
 
     // pin observation log; FKs on messages + channels. view after the table.
     client.query_opt(PIN_EVENTS_TABLE, &[]).await?;

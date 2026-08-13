@@ -4,6 +4,7 @@ use serenity::prelude::*;
 use std::collections::HashMap;
 use std::env;
 
+mod attachments;
 mod backfill;
 mod link_rewriter;
 mod logger;

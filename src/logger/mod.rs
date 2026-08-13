@@ -26,6 +26,8 @@ pub struct DiscordLogger {
     catch_up_floors: HashMap<i64, i64>,
     // run-once guard: ready re-fires on every reconnect, the swap keeps the backfill spawn idempotent
     started: AtomicBool,
+    // present iff ATTACHMENTS_DIR is configured and ATTACHMENTS_DISABLE != 1
+    attachment_store: Option<Arc<crate::attachments::AttachmentStore>>,
 }
 
 impl DiscordLogger {
@@ -33,10 +35,18 @@ impl DiscordLogger {
         postgres_client: tokio_postgres::Client,
         catch_up_floors: HashMap<i64, i64>,
     ) -> Self {
+        let database = Arc::new(Database::new(postgres_client).await);
+        let attachment_store = crate::attachments::Config::from_env().map(|cfg| {
+            Arc::new(
+                crate::attachments::AttachmentStore::new(cfg, database.clone())
+                    .expect("failed to create ATTACHMENTS_DIR"),
+            )
+        });
         DiscordLogger {
-            database: Arc::new(Database::new(postgres_client).await),
+            database,
             catch_up_floors,
             started: AtomicBool::new(false),
+            attachment_store,
         }
     }
 
@@ -320,6 +330,24 @@ impl EventHandler for DiscordLogger {
             .await
             .expect("failed to save logged message to database");
 
+        // download while the gateway-delivered CDN URL is still fresh (signed, ~24h); spawned so
+        // a slow/large download never blocks the event loop, and after log_message so the metadata
+        // rows are durable first. Failures leave no attachment_files row, so the next boot's drain
+        // (which refreshes the URL via REST) is the retry path.
+        if let Some(store) = &self.attachment_store {
+            if !new_message.attachments.is_empty() {
+                let store = store.clone();
+                let attachments = new_message.attachments.clone();
+                tokio::spawn(async move {
+                    for attachment in &attachments {
+                        if let Err(e) = store.store_attachment(attachment).await {
+                            eprintln!("attachments: live download {}: {e}", attachment.id);
+                        }
+                    }
+                });
+            }
+        }
+
         // randomly react to incoming messages 0.1% of the time
         if rand::random::<f64>() < 0.001 {
             new_message
@@ -364,20 +392,32 @@ impl EventHandler for DiscordLogger {
 
         println!("client is now ready and listening");
 
-        // spawn backfill once per process (ready re-fires on reconnect; the swap is idempotent).
-        // No opt-in flag — both passes are normal operating behavior; only BACKFILL_DISABLE=1
-        // suppresses them. Spawning keeps the gateway + live logging responsive while it runs.
-        let disabled = std::env::var("BACKFILL_DISABLE").as_deref() == Ok("1");
-        if disabled {
-            println!("backfill: disabled via BACKFILL_DISABLE");
-        } else if !self.started.swap(true, Ordering::SeqCst) {
-            let http = ctx.http.clone();
-            let db = self.database.clone();
-            let floors = self.catch_up_floors.clone();
-            let cfg = crate::backfill::Config::from_env();
-            tokio::spawn(async move {
-                crate::backfill::run(http, db, cfg, floors).await;
-            });
+        // spawn the boot-time tasks once per process (ready re-fires on reconnect; the swap is
+        // idempotent). No opt-in flags — these are normal operating behavior; BACKFILL_DISABLE=1
+        // and ATTACHMENTS_DISABLE=1 suppress them individually. Spawning keeps the gateway +
+        // live logging responsive while they run.
+        if !self.started.swap(true, Ordering::SeqCst) {
+            if std::env::var("BACKFILL_DISABLE").as_deref() == Ok("1") {
+                println!("backfill: disabled via BACKFILL_DISABLE");
+            } else {
+                let http = ctx.http.clone();
+                let db = self.database.clone();
+                let floors = self.catch_up_floors.clone();
+                let cfg = crate::backfill::Config::from_env();
+                tokio::spawn(async move {
+                    crate::backfill::run(http, db, cfg, floors).await;
+                });
+            }
+            // historical attachment drain, concurrent with backfill (own rate knob); the two
+            // together stay around 2 REST GETs per delay tick, and serenity's per-route rate
+            // limiter backstops any contention
+            if let Some(store) = &self.attachment_store {
+                let http = ctx.http.clone();
+                let store = store.clone();
+                tokio::spawn(async move {
+                    crate::attachments::run(http, store).await;
+                });
+            }
         }
     }
 }

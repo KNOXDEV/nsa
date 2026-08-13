@@ -23,6 +23,15 @@ in {
       default = pkgs.internal.nsa;
       description = "The nsa package to run.";
     };
+
+    attachmentsMaxBytes = lib.mkOption {
+      type = lib.types.nullOr lib.types.int;
+      default = null; # bot default: 100 MiB
+      description = ''
+        Cap for locally stored attachment files; oversized ones are recorded
+        but skipped, and re-fetched automatically if the cap is later raised.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -69,10 +78,15 @@ in {
         "postgresql.service"
         "nsa-postgres-password.service"
       ];
-      environment = {
-        PG_HOST = "/run/postgresql";
-        PG_USER = "nsa";
-      };
+      environment =
+        {
+          PG_HOST = "/run/postgresql";
+          PG_USER = "nsa";
+          ATTACHMENTS_DIR = "/var/lib/nsa/attachments";
+        }
+        // lib.optionalAttrs (cfg.attachmentsMaxBytes != null) {
+          ATTACHMENTS_MAX_BYTES = toString cfg.attachmentsMaxBytes;
+        };
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;
         EnvironmentFile = cfg.environmentFile;
@@ -80,6 +94,10 @@ in {
         Group = "nsa";
         Restart = "always";
         RestartSec = "5s";
+        # writable exemption from ProtectSystem=strict for the attachment file store;
+        # 0700 because captured Discord content is sensitive
+        StateDirectory = "nsa";
+        StateDirectoryMode = "0700";
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
