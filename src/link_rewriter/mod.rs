@@ -232,7 +232,11 @@ impl EventHandler for DiscordLinkRewriter {
         // so the lost attribution is preserved.
         if only_rewritten_links {
             // a single link reads better inline; multiple get their own lines
-            let separator = if rewritten_links.len() == 1 { " " } else { "\n" };
+            let separator = if rewritten_links.len() == 1 {
+                " "
+            } else {
+                "\n"
+            };
             new_message
                 .channel_id
                 .say(

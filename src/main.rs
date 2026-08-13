@@ -39,6 +39,10 @@ impl EventHandler for Handlers {
         self.logger.guild_create(ctx, guild, is_new).await;
     }
 
+    async fn channel_pins_update(&self, ctx: Context, pin: ChannelPinsUpdateEvent) {
+        self.logger.channel_pins_update(ctx, pin).await;
+    }
+
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
         self.logger.reaction_add(ctx, add_reaction).await;
     }
@@ -82,7 +86,9 @@ async fn main() {
 
     // connect to discord
     let token = env::var("DISCORD_TOKEN").expect("no environment variable DISCORD_TOKEN provided");
-    let intents = GatewayIntents::GUILD_MESSAGES
+    // GUILDS is required for CHANNEL_PINS_UPDATE (non-privileged; also turns on GUILD_CREATE)
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 

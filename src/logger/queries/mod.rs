@@ -9,6 +9,8 @@ const INSERT_ATTACHMENT_QUERY: &str = include_str!("./insert-attachment.sql");
 const INSERT_EMOJI_QUERY: &str = include_str!("./insert-emoji.sql");
 const INSERT_REACTION_QUERY: &str = include_str!("./insert-reaction.sql");
 const MESSAGE_EXISTS_QUERY: &str = include_str!("./message-exists.sql");
+const INSERT_PIN_EVENT_QUERY: &str = include_str!("./insert-pin-event.sql");
+const CURRENT_PINS_FOR_CHANNEL_QUERY: &str = include_str!("./current-pins-for-channel.sql");
 // backfill query SQL lives next to the backfill module (CLAUDE.md's "SQL next to its module"),
 // but the prepared statements over it stay centralized in this one Database struct.
 const LIST_BACKFILL_CHANNELS_QUERY: &str =
@@ -34,6 +36,8 @@ pub struct Database {
     insert_emoji_statement: Statement,
     insert_reaction_statement: Statement,
     message_exists_statement: Statement,
+    insert_pin_event_statement: Statement,
+    current_pins_for_channel_statement: Statement,
     list_backfill_channels_statement: Statement,
     get_backfill_state_statement: Statement,
     upsert_backfill_state_statement: Statement,
@@ -53,6 +57,8 @@ impl Database {
             insert_emoji_statement,
             insert_reaction_statement,
             message_exists_statement,
+            insert_pin_event_statement,
+            current_pins_for_channel_statement,
             list_backfill_channels_statement,
             get_backfill_state_statement,
             upsert_backfill_state_statement,
@@ -68,6 +74,8 @@ impl Database {
             postgres_client.prepare(INSERT_EMOJI_QUERY),
             postgres_client.prepare(INSERT_REACTION_QUERY),
             postgres_client.prepare(MESSAGE_EXISTS_QUERY),
+            postgres_client.prepare(INSERT_PIN_EVENT_QUERY),
+            postgres_client.prepare(CURRENT_PINS_FOR_CHANNEL_QUERY),
             postgres_client.prepare(LIST_BACKFILL_CHANNELS_QUERY),
             postgres_client.prepare(GET_BACKFILL_STATE_QUERY),
             postgres_client.prepare(UPSERT_BACKFILL_STATE_QUERY),
@@ -87,6 +95,8 @@ impl Database {
             insert_emoji_statement,
             insert_reaction_statement,
             message_exists_statement,
+            insert_pin_event_statement,
+            current_pins_for_channel_statement,
             list_backfill_channels_statement,
             get_backfill_state_statement,
             upsert_backfill_state_statement,
@@ -192,6 +202,32 @@ impl Database {
             .query_opt(&self.message_exists_statement, &[&id])
             .await?
             .is_some())
+    }
+
+    pub async fn insert_pin_event(
+        &self,
+        message_id: i64,
+        channel_id: i64,
+        pinned: bool,
+        observed_at: NaiveDateTime,
+    ) -> Result<u64, Error> {
+        self.postgres_client
+            .execute(
+                &self.insert_pin_event_statement,
+                &[&message_id, &channel_id, &pinned, &observed_at],
+            )
+            .await
+    }
+
+    // message ids currently pinned in this channel, per the latest observations
+    pub async fn current_pins_for_channel(&self, channel_id: i64) -> Result<Vec<i64>, Error> {
+        Ok(self
+            .postgres_client
+            .query(&self.current_pins_for_channel_statement, &[&channel_id])
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect())
     }
 
     // every channel we've seen a message in, with its high-water last_message_id (the catch-up floor)

@@ -1,6 +1,6 @@
 pub(crate) mod queries;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -9,9 +9,12 @@ use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::futures::future::join_all;
 use serenity::gateway::ActivityData;
+use serenity::http::Http;
 use serenity::model::channel::{Channel, Message, Reaction, ReactionType};
+use serenity::model::event::ChannelPinsUpdateEvent;
 use serenity::model::gateway::Ready;
 use serenity::model::guild::Guild;
+use serenity::model::id::ChannelId;
 
 use crate::logger::queries::Database;
 
@@ -209,16 +212,98 @@ pub(crate) async fn persist_message(
     Ok(true)
 }
 
+// Reconcile a channel's pin state against Discord: fetch the live pin list (<=50 messages), diff it
+// against the current_pins view, append pinned=true rows for new pins and pinned=false rows for
+// vanished ones. Idempotent — identical sets write nothing, so RESUME duplicates and every-boot
+// syncs are no-ops. Shared by the live channel_pins_update handler and the startup pass in backfill
+// (which is also why this takes &Http rather than &Context).
+pub(crate) async fn sync_channel_pins(
+    http: &Http,
+    db: &Database,
+    channel_id: i64,
+    guild_id: Option<i64>,
+) -> Result<(), tokio_postgres::Error> {
+    // soft-fail on REST error (missing access / deleted channel), like other REST paths
+    let fetched_messages = match ChannelId::new(channel_id as u64).pins(http).await {
+        Ok(pins) => pins,
+        Err(e) => {
+            eprintln!("pins: failed to fetch pins for channel {channel_id}: {e}");
+            return Ok(());
+        }
+    };
+
+    let stored: HashSet<i64> = db
+        .current_pins_for_channel(channel_id)
+        .await?
+        .into_iter()
+        .collect();
+    let fetched: HashSet<i64> = fetched_messages.iter().map(|m| m.id.get() as i64).collect();
+    if stored == fetched {
+        return Ok(()); // steady state: no rows written
+    }
+
+    // like reactions, observation time stands in for the (unavailable) pin time
+    let observed_at = Utc::now().naive_utc();
+
+    // new pins: backfill the message row first (pin_events.message_id FK)
+    for message in &fetched_messages {
+        let message_id = message.id.get() as i64;
+        if stored.contains(&message_id) {
+            continue;
+        }
+        if !db.message_exists(message_id).await? {
+            // degraded channel/guild rows so the messages FK holds (mirrors log_message's
+            // fetch-failed branch; pins() messages carry no guild_id, so use the event's).
+            // A later live message enriches name/guild via the COALESCE upsert.
+            if let Some(guild_id) = guild_id {
+                db.insert_guild(guild_id, None).await?;
+            }
+            db.insert_channel(channel_id, None, guild_id, message_id, message_id)
+                .await?;
+            if !persist_message(db, message).await? {
+                // out-of-range timestamp skip: no messages row, so no pin row either
+                eprintln!("pins: skipping pin for unpersistable message {message_id}");
+                continue;
+            }
+        }
+        db.insert_pin_event(message_id, channel_id, true, observed_at)
+            .await?;
+    }
+
+    // vanished pins: these ids came from pin_events, so the messages row already exists
+    for message_id in stored.difference(&fetched) {
+        db.insert_pin_event(*message_id, channel_id, false, observed_at)
+            .await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl EventHandler for DiscordLogger {
-    // when joining a new guild, store its information
+    // fires per guild on every (re)connect now that the GUILDS intent is on; the upsert is
+    // idempotent, and a transient DB error drops the event rather than panicking the task
     async fn guild_create(&self, _ctx: Context, guild: Guild, _is_new: Option<bool>) {
-        self.database
+        if let Err(e) = self
+            .database
             .insert_guild(guild.id.get() as i64, Some(&guild.name))
             .await
-            .expect("failed to log guild");
+        {
+            eprintln!("failed to log guild {}: {e}", guild.name);
+            return;
+        }
 
         println!("logged new guild: {}", guild.name)
+    }
+
+    // CHANNEL_PINS_UPDATE carries no message id and no pin/unpin discriminator,
+    // so every event triggers a full fetch-and-diff of the channel's pin list.
+    async fn channel_pins_update(&self, ctx: Context, pin: ChannelPinsUpdateEvent) {
+        let channel_id = pin.channel_id.get() as i64;
+        let guild_id = pin.guild_id.map(|g| g.get() as i64);
+        // soft-fail: drop the event on a transient DB error rather than panicking the task
+        if let Err(e) = sync_channel_pins(&ctx.http, &self.database, channel_id, guild_id).await {
+            eprintln!("pins: failed to sync channel {channel_id}: {e}");
+        }
     }
 
     // log every message and its reactions, etc

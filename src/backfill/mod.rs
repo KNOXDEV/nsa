@@ -19,8 +19,8 @@ use serenity::model::channel::{Message, ReactionType};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::time::sleep;
 
-use crate::logger::persist_message;
 use crate::logger::queries::Database;
+use crate::logger::{persist_message, sync_channel_pins};
 
 const DEFAULT_PAGE_DELAY_MS: u64 = 750;
 const PAGE_LIMIT: u8 = 100; // Discord's GetMessages cap
@@ -73,6 +73,18 @@ pub async fn run(http: Arc<Http>, db: Arc<Database>, cfg: Config, floors: HashMa
         )
         .await;
     }
+    // full pin reconcile every boot: one pins() GET per channel, diffed against current_pins.
+    // guild_id None — every channel here already has a channels row, so the degraded channel
+    // insert inside the sync is a no-op. Runs before the sweeps so it never waits behind a
+    // multi-hour first download; soft-fails per channel like the other passes.
+    println!("backfill: pin sync — {} channels", channels.len());
+    for (channel_id, _) in &channels {
+        if let Err(e) = sync_channel_pins(&http, &db, *channel_id, None).await {
+            eprintln!("backfill: pin sync {channel_id}: {e}");
+        }
+        sleep(cfg.page_delay).await;
+    }
+
     for (channel_id, _) in &channels {
         sweep_channel(&http, &db, *channel_id, &cfg).await;
     }

@@ -11,6 +11,8 @@ const REACTION_COUNTS_TABLE: &str = include_str!("./reaction_counts.sql");
 const REACTION_SUMMARY_VIEW: &str = include_str!("./reaction-summary.sql");
 const ATTACHMENTS_TABLE: &str = include_str!("./attachments.sql");
 const MESSAGES_TABLE: &str = include_str!("./messages.sql");
+const PIN_EVENTS_TABLE: &str = include_str!("./pin_events.sql");
+const CURRENT_PINS_VIEW: &str = include_str!("./current-pins.sql");
 const BACKFILL_STATE_TABLE: &str = include_str!("./backfill_state.sql");
 
 pub async fn init_tables(client: &Client) -> Result<(), Error> {
@@ -33,6 +35,10 @@ pub async fn init_tables(client: &Client) -> Result<(), Error> {
     // reconciliation view; must run after current_reactions + reaction_counts exist
     client.query_opt(REACTION_SUMMARY_VIEW, &[]).await?;
     client.query_opt(ATTACHMENTS_TABLE, &[]).await?;
+
+    // pin observation log; FKs on messages + channels. view after the table.
+    client.query_opt(PIN_EVENTS_TABLE, &[]).await?;
+    client.query_opt(CURRENT_PINS_VIEW, &[]).await?;
 
     // internal checkpoint for the historical sweep (no FK; keyed by channel id)
     client.query_opt(BACKFILL_STATE_TABLE, &[]).await?;
